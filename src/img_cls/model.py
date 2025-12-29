@@ -92,6 +92,9 @@ if __name__ == '__main__':
 
     DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
 
+    weight_file = 'dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth'
+    model_name = 'dinov3_convnext_tiny'
+
     sample_size = 224
 
     # Define image transformation
@@ -111,8 +114,8 @@ if __name__ == '__main__':
     # Loading the pretrained model without classification head.
     model = load_model(
         repo_dir=DINOV3_REPO, 
-        weights=os.path.join(DINOV3_WEIGHTS, 'dinov3_vits16_pretrain_lvd1689m-08c60483.pth'),
-        model_name='dinov3_vits16'
+        weights=os.path.join(DINOV3_WEIGHTS, weight_file),
+        model_name=model_name
     )
 
     # Total parameters and trainable parameters.
@@ -147,8 +150,8 @@ if __name__ == '__main__':
 
     model_cls = Dinov3Classification(
         repo_dir=DINOV3_REPO, 
-        weights=os.path.join(DINOV3_WEIGHTS, 'dinov3_vits16_pretrain_lvd1689m-08c60483.pth'),
-        model_name='dinov3_vits16'
+        weights=os.path.join(DINOV3_WEIGHTS, weight_file),
+        model_name=model_name
     )
 
     summary(

@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: img_cls.model (module)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.img_cls.model",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
