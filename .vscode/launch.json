@@ -8,6 +8,26 @@
             "module": "src.img_cls.model",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: infer_classifier",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_classifier.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--weights",
+                "outputs/transfer_learn/best_model.pth",
+                "--config",
+                "classification_configs/cards.yaml",
+                "--model-name",
+                "dinov3_convnext_tiny",
+                "--repo-dir",
+                "dinov3",
+                "--input",
+                "input/inference_data/"
+            ]
         }
     ]
 }
