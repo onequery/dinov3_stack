@@ -28,6 +28,14 @@
                 "--input",
                 "input/inference_data/"
             ]
+        },
+        {
+            "name": "Python Debugger: tmp.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tmp.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
         }
     ]
 }

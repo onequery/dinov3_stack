@@ -9,3 +9,6 @@ input/*
 !input/readme.txt
 outputs/
 src/detection/config_test.py
+
+# private files
+stent_*_filenames.txt
