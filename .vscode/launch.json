@@ -30,12 +30,12 @@
             ]
         },
         {
-            "name": "Python Debugger: tmp.py",
+            "name": "Python Debugger: export_dicom_frame.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/tmp.py",
+            "program": "${workspaceFolder}/export_dicom_frame.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
-        }
+        },
     ]
 }
