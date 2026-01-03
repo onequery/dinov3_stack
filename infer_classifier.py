@@ -58,22 +58,27 @@ DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
 
 # Constants and other configurations.
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-IMAGE_RESIZE = 256
+# IMAGE_RESIZE = 256
 
 with open(args.config, "r") as f:
     config = yaml.safe_load(f)
     f.close()
 CLASS_NAMES = config["CLASS_NAMES"]
+RESIZE_SIZE = config.get("RESIZE_SIZE")
+if RESIZE_SIZE is None:
+    raise ValueError("[ERROR] 'RESIZE_SIZE' not found in the config YAML.")
+CENTER_CROP_SIZE = config.get("CENTER_CROP_SIZE")
+if CENTER_CROP_SIZE is None:
+    raise ValueError("[ERROR] 'CENTER_CROP_SIZE' not found in the config YAML.")
 
 
 # Validation transforms
-def get_test_transform(image_size):
+def get_test_transform():
     test_transform = transforms.Compose(
         [
             transforms.ToPILImage(),
-            # transforms.Resize((image_size, image_size)),
-            # transforms.CenterCrop((224, 224)),
-            transforms.CenterCrop((448, 448)),
+            transforms.Resize((RESIZE_SIZE, RESIZE_SIZE)),
+            transforms.CenterCrop((CENTER_CROP_SIZE, CENTER_CROP_SIZE)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ]
@@ -138,7 +143,7 @@ if __name__ == "__main__":
 
     all_image_paths = glob.glob(os.path.join(args.input, "*"))
 
-    transform = get_test_transform(IMAGE_RESIZE)
+    transform = get_test_transform()
 
     for i, image_path in enumerate(all_image_paths):
         print(f"Inference on image: {i+1}")

@@ -37,5 +37,25 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
         },
+        {
+            "name": "Python Debugger: eval_classifier.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_classifier.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--weights",
+                "outputs/train/stent_cls/best_model.pth",
+                "--input",
+                "input/stent_split_img/test/",
+                "--config",
+                "classification_configs/stent.yaml",
+                "--model-name",
+                "dinov3_convnext_tiny",
+                "--out-dir",
+                "outputs/eval/stent_cls/"
+            ]
+        },
     ]
 }

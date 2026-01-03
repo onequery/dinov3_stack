@@ -4,19 +4,18 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 # Required constants.
-IMAGE_SIZE = 256  # Image size of resize when applying transforms.
+# IMAGE_SIZE = 256  # Image size of resize when applying transforms.
 NUM_WORKERS = 4  # Number of parallel processes for data preparation.
 IMG_MEAN = (0.485, 0.456, 0.406)
 IMG_STD = (0.229, 0.224, 0.225)
 
 
 # Training transforms
-def get_train_transform(image_size):
+def get_train_transform(resize_size, center_crop_size):
     train_transform = transforms.Compose(
         [
-            # transforms.Resize((image_size, image_size)),
-            # transforms.CenterCrop((224, 224)),
-            transforms.CenterCrop((448, 448)),
+            transforms.Resize((resize_size, resize_size)),
+            transforms.CenterCrop((center_crop_size, center_crop_size)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMG_MEAN, std=IMG_STD),
@@ -26,12 +25,11 @@ def get_train_transform(image_size):
 
 
 # Validation transforms
-def get_valid_transform(image_size):
+def get_valid_transform(resize_size, center_crop_size):
     valid_transform = transforms.Compose(
         [
-            # transforms.Resize((image_size, image_size)),
-            # transforms.CenterCrop((224, 224)),
-            transforms.CenterCrop((448, 448)),
+            transforms.Resize((resize_size, resize_size)),
+            transforms.CenterCrop((center_crop_size, center_crop_size)),
             transforms.ToTensor(),
             transforms.Normalize(mean=IMG_MEAN, std=IMG_STD),
         ]
@@ -39,17 +37,18 @@ def get_valid_transform(image_size):
     return valid_transform
 
 
-def get_datasets(train_dir, valid_dir):
+def get_datasets(train_dir, valid_dir, resize, center_crop):
     """
     Function to prepare the Datasets.
     Returns the training and validation datasets along
     with the class names.
     """
+
     dataset_train = datasets.ImageFolder(
-        train_dir, transform=(get_train_transform(IMAGE_SIZE))
+        train_dir, transform=(get_train_transform(resize, center_crop))
     )
     dataset_valid = datasets.ImageFolder(
-        valid_dir, transform=(get_valid_transform(IMAGE_SIZE))
+        valid_dir, transform=(get_valid_transform(resize, center_crop))
     )
     return dataset_train, dataset_valid, dataset_train.classes
 

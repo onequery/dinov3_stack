@@ -1,17 +1,18 @@
-import torch
 import argparse
-import torch.nn as nn
-import torch.optim as optim
 import os
 import random
-import numpy as np
 
-from tqdm.auto import tqdm
-from src.img_cls.model import Dinov3Classification
-from src.img_cls.datasets import get_datasets, get_data_loaders
-from src.img_cls.utils import save_model, save_plots, SaveBestModel
-from src.utils.common import get_dinov3_paths
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from torch.optim.lr_scheduler import MultiStepLR
+from tqdm.auto import tqdm
+
+from src.img_cls.datasets import get_data_loaders, get_datasets
+from src.img_cls.model import Dinov3Classification
+from src.img_cls.utils import SaveBestModel, save_model, save_plots
+from src.utils.common import get_dinov3_paths
 
 seed = 42
 random.seed(seed)
@@ -26,88 +27,87 @@ torch.backends.cudnn.benchmark = True
 # Construct the argument parser.
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    '-e', '--epochs', 
-    type=int, 
-    default=10,
-    help='Number of epochs to train our network for'
-)
-parser.add_argument(
-    '-lr', '--learning-rate', 
-    type=float,
-    dest='learning_rate', 
-    default=0.001,
-    help='Learning rate for training the model'
-)
-parser.add_argument(
-    '-b', '--batch-size',
-    dest='batch_size',
-    default=32,
-    type=int
-)
-parser.add_argument(
-    '--save-name',
-    dest='save_name',
-    default='model',
-    help='file name of the final model to save'
-)
-parser.add_argument(
-    '--fine-tune',
-    dest='fine_tune',
-    action='store_true',
-    help='whether to fine-tune the model or train the classifier layer only'
-)
-parser.add_argument(
-    '--out-dir',
-    dest='out_dir',
-    default='img_cls',
-    help='output sub-directory path inside the `outputs` directory'
-)
-parser.add_argument(
-    '--scheduler',
+    "-e",
+    "--epochs",
     type=int,
-    nargs='+',
+    default=10,
+    help="Number of epochs to train our network for",
+)
+parser.add_argument(
+    "-lr",
+    "--learning-rate",
+    type=float,
+    dest="learning_rate",
+    default=0.001,
+    help="Learning rate for training the model",
+)
+parser.add_argument("-b", "--batch-size", dest="batch_size", default=32, type=int)
+parser.add_argument(
+    "--save-name",
+    dest="save_name",
+    default="model",
+    help="file name of the final model to save",
+)
+parser.add_argument(
+    "--fine-tune",
+    dest="fine_tune",
+    action="store_true",
+    help="whether to fine-tune the model or train the classifier layer only",
+)
+parser.add_argument(
+    "--out-dir",
+    dest="out_dir",
+    default="img_cls",
+    help="output sub-directory path inside the `outputs` directory",
+)
+parser.add_argument(
+    "--scheduler",
+    type=int,
+    nargs="+",
     default=[1000],
-    help='number of epochs after which learning rate scheduler is applied'
+    help="number of epochs after which learning rate scheduler is applied",
 )
 parser.add_argument(
-    '--train-dir',
-    dest='train_dir',
+    "--train-dir",
+    dest="train_dir",
     required=True,
-    help='path to the training directory containing class folders in \
-          PyTorch ImageFolder format'
+    help="path to the training directory containing class folders in \
+          PyTorch ImageFolder format",
 )
 parser.add_argument(
-    '--valid-dir',
-    dest='valid_dir',
+    "--valid-dir",
+    dest="valid_dir",
     required=True,
-    help='path to the validation directory containing class folders in \
-          PyTorch ImageFolder format'
+    help="path to the validation directory containing class folders in \
+          PyTorch ImageFolder format",
 )
 parser.add_argument(
-    '--weights',
-    help='path to the pretrained backbone weights',
-    required=True
+    "--weights", help="path to the pretrained backbone weights", required=True
 )
 parser.add_argument(
-    '--repo-dir',
-    dest='repo_dir',
-    help='path to the cloned DINOv3 repository',
+    "--repo-dir",
+    dest="repo_dir",
+    help="path to the cloned DINOv3 repository",
 )
 parser.add_argument(
-    '--model-name',
-    dest='model_name',
-    help='name of the model, check: https://github.com/facebookresearch/dinov3?tab=readme-ov-file#pretrained-backbones-via-pytorch-hub',
-    default='dinov3_vits16'
+    "--model-name",
+    dest="model_name",
+    help="name of the model, check: https://github.com/facebookresearch/dinov3?tab=readme-ov-file#pretrained-backbones-via-pytorch-hub",
+    default="dinov3_vits16",
+)
+parser.add_argument(
+    "--config", required=True, help="yaml file with IMAGE_SIZE and CENTER_CROP_SIZE"
 )
 args = parser.parse_args()
 print(args)
 
 DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
 
+
 # Training function.
 def train(model, trainloader, optimizer, criterion):
     model.train()
-    print('Training')
+    print("Training")
     train_running_loss = 0.0
     train_running_correct = 0
     counter = 0
@@ -129,16 +129,17 @@ def train(model, trainloader, optimizer, criterion):
         loss.backward()
         # Update the weights.
         optimizer.step()
-    
+
     # Loss and accuracy for the complete epoch.
     epoch_loss = train_running_loss / counter
-    epoch_acc = 100. * (train_running_correct / len(trainloader.dataset))
+    epoch_acc = 100.0 * (train_running_correct / len(trainloader.dataset))
     return epoch_loss, epoch_acc
+
 
 # Validation function.
 def validate(model, testloader, criterion, class_names):
     model.eval()
-    print('Validation')
+    print("Validation")
     valid_running_loss = 0.0
     valid_running_correct = 0
     counter = 0
@@ -146,7 +147,7 @@ def validate(model, testloader, criterion, class_names):
     with torch.no_grad():
         for i, data in tqdm(enumerate(testloader), total=len(testloader)):
             counter += 1
-            
+
             image, labels = data
             image = image.to(device)
             labels = labels.to(device)
@@ -158,20 +159,23 @@ def validate(model, testloader, criterion, class_names):
             # Calculate the accuracy.
             _, preds = torch.max(outputs.data, 1)
             valid_running_correct += (preds == labels).sum().item()
-        
+
     # Loss and accuracy for the complete epoch.
     epoch_loss = valid_running_loss / counter
-    epoch_acc = 100. * (valid_running_correct / len(testloader.dataset))
+    epoch_acc = 100.0 * (valid_running_correct / len(testloader.dataset))
     return epoch_loss, epoch_acc
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # Create a directory with the model name for outputs.
-    out_dir = os.path.join('outputs', args.out_dir)
+    out_dir = os.path.join("outputs", args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     # Load the training and validation datasets.
     dataset_train, dataset_valid, dataset_classes = get_datasets(
-        train_dir=args.train_dir, 
-        valid_dir=args.valid_dir
+        train_dir=args.train_dir,
+        valid_dir=args.valid_dir,
+        resize=args.config["RESIZE_SIZE"],
+        center_crop=args.config["CENTER_CROP_SIZE"],
     )
     print(f"[INFO]: Number of training images: {len(dataset_train)}")
     print(f"[INFO]: Number of validation images: {len(dataset_valid)}")
@@ -181,35 +185,34 @@ if __name__ == '__main__':
         dataset_train, dataset_valid, batch_size=args.batch_size
     )
 
-    # Learning_parameters. 
+    # Learning_parameters.
     lr = args.learning_rate
     epochs = args.epochs
-    device = ('cuda' if torch.cuda.is_available() else 'cpu')
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Computation device: {device}")
     print(f"Learning rate: {lr}")
     print(f"Epochs to train for: {epochs}\n")
 
     # Load the model.
     model = Dinov3Classification(
-        num_classes=len(dataset_classes), 
-        fine_tune=args.fine_tune, 
+        num_classes=len(dataset_classes),
+        fine_tune=args.fine_tune,
         weights=os.path.join(DINOV3_WEIGHTS, args.weights),
         model_name=args.model_name,
-        repo_dir=DINOV3_REPO
+        repo_dir=DINOV3_REPO,
     ).to(device)
     print(model)
-    
+
     # Total parameters and trainable parameters.
     total_params = sum(p.numel() for p in model.parameters())
     print(f"{total_params:,} total parameters.")
     total_trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad)
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
     print(f"{total_trainable_params:,} training parameters.")
 
     # Optimizer.
-    optimizer = optim.SGD(
-        model.parameters(), lr=lr, momentum=0.9, nesterov=True
-    )
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True)
     # optimizer = optim.Adam(model.parameters(), lr=lr)
     # Loss function.
     criterion = nn.CrossEntropyLoss()
@@ -226,20 +229,24 @@ if __name__ == '__main__':
     # Start the training.
     for epoch in range(epochs):
         print(f"[INFO]: Epoch {epoch+1} of {epochs}")
-        train_epoch_loss, train_epoch_acc = train(model, train_loader, 
-                                                optimizer, criterion)
-        valid_epoch_loss, valid_epoch_acc = validate(model, valid_loader,  
-                                                    criterion, dataset_classes)
+        train_epoch_loss, train_epoch_acc = train(
+            model, train_loader, optimizer, criterion
+        )
+        valid_epoch_loss, valid_epoch_acc = validate(
+            model, valid_loader, criterion, dataset_classes
+        )
         train_loss.append(train_epoch_loss)
         valid_loss.append(valid_epoch_loss)
         train_acc.append(train_epoch_acc)
         valid_acc.append(valid_epoch_acc)
-        print(f"Training loss: {train_epoch_loss:.3f}, training acc: {train_epoch_acc:.3f}")
-        print(f"Validation loss: {valid_epoch_loss:.3f}, validation acc: {valid_epoch_acc:.3f}")
-        save_best_model(
-            valid_epoch_loss, epoch, model, out_dir, args.save_name
+        print(
+            f"Training loss: {train_epoch_loss:.3f}, training acc: {train_epoch_acc:.3f}"
         )
-        print('-'*50)
+        print(
+            f"Validation loss: {valid_epoch_loss:.3f}, validation acc: {valid_epoch_acc:.3f}"
+        )
+        save_best_model(valid_epoch_loss, epoch, model, out_dir, args.save_name)
+        print("-" * 50)
         scheduler.step()
         last_lr = scheduler.get_last_lr()
         print(f"LR for next epoch: {last_lr}")
@@ -248,4 +255,4 @@ if __name__ == '__main__':
     save_model(epochs, model, optimizer, criterion, out_dir, args.save_name)
     # Save the loss and accuracy plots.
     save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir)
-    print('TRAINING COMPLETE')
+    print("TRAINING COMPLETE")
