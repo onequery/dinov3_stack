@@ -168,6 +168,14 @@ def validate(model, testloader, criterion, class_names):
 
 
 if __name__ == "__main__":
+
+    print("=============== CUDA Device ===============")
+    print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
+    print("torch.cuda.device_count():", torch.cuda.device_count())
+    print("torch.cuda.current_device():", torch.cuda.current_device())
+    print("torch.cuda.get_device_name(0):", torch.cuda.get_device_name(0))
+    print("===========================================")
+
     # Create a directory with the model name for outputs.
     # out_dir = os.path.join("outputs", args.out_dir)
     out_dir = args.out_dir
