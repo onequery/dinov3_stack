@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import yaml
 from torch.optim.lr_scheduler import MultiStepLR
 from tqdm.auto import tqdm
 
@@ -168,14 +169,18 @@ def validate(model, testloader, criterion, class_names):
 
 if __name__ == "__main__":
     # Create a directory with the model name for outputs.
-    out_dir = os.path.join("outputs", args.out_dir)
+    # out_dir = os.path.join("outputs", args.out_dir)
+    out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
     # Load the training and validation datasets.
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+
     dataset_train, dataset_valid, dataset_classes = get_datasets(
         train_dir=args.train_dir,
         valid_dir=args.valid_dir,
-        resize=args.config["RESIZE_SIZE"],
-        center_crop=args.config["CENTER_CROP_SIZE"],
+        resize=config["RESIZE_SIZE"],
+        center_crop=config["CENTER_CROP_SIZE"],
     )
     print(f"[INFO]: Number of training images: {len(dataset_train)}")
     print(f"[INFO]: Number of validation images: {len(dataset_valid)}")

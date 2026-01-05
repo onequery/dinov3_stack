@@ -214,24 +214,41 @@ with open(os.path.join(args.out_dir, f"confusion_matrix_{timestamp}.txt"), "w") 
     f.write("Confusion Matrix (rows = GT, cols = Prediction)\n\n")
     f.write(cm_df.to_string())
 
-# Heatmap
-cm_normalized = conf_mat.astype(np.float32) / conf_mat.sum(axis=1, keepdims=True)
+# --------------------------------------------------
+# Confusion Matrix Visualization (Improved)
+# --------------------------------------------------
+cm_normalized = conf_mat.astype(np.float32)
+cm_normalized = cm_normalized / cm_normalized.sum(axis=1, keepdims=True)
 
-plt.figure(figsize=(6, 5))
+num_classes = len(CLASS_NAMES)
+
+# Figure size를 클래스 수에 비례하게 키움
+fig_size = max(12, num_classes * 0.35)
+
+plt.figure(figsize=(fig_size, fig_size))
+
 sns.heatmap(
     cm_normalized,
-    annot=True,
-    fmt=".2f",
     cmap="Blues",
+    annot=False,  # ★ 핵심: 숫자 제거
+    square=True,
+    cbar_kws={"shrink": 0.7},
     xticklabels=CLASS_NAMES,
     yticklabels=CLASS_NAMES,
 )
-plt.xlabel("Predicted")
-plt.ylabel("Ground Truth")
-plt.title("Normalized Confusion Matrix")
+
+plt.xlabel("Predicted", fontsize=14)
+plt.ylabel("Ground Truth", fontsize=14)
+plt.title("Normalized Confusion Matrix", fontsize=16)
+
+# tick label 가독성 개선
+plt.xticks(rotation=90, fontsize=6)
+plt.yticks(rotation=0, fontsize=6)
+
 plt.tight_layout()
-plt.savefig(os.path.join(args.out_dir, f"confusion_matrix_{timestamp}.png"), dpi=200)
+plt.savefig(os.path.join(args.out_dir, f"confusion_matrix_{timestamp}.png"), dpi=300)
 plt.close()
+
 
 # 3) Per-image prediction log
 pred_df = pd.DataFrame(records)
