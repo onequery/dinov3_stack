@@ -40,22 +40,22 @@ mkdir -p ${OUTPUT_ROOT}
 # --model-name ${MODEL_NAME} \
 # --out-dir ${OUTPUT_ROOT}/2_card_cls_full_fine_tune
 
-# -----------------------------
-# 3. Stent classification head fine-tuning evaluation
-# -----------------------------
-python eval_classifier.py \
---weights outputs/train/vits16/3_stent_cls_head_fine_tune_low_res/best_model.pth \
---input input/stent_split_img/test \
---config classification_configs/stent_low_res.yaml \
---model-name ${MODEL_NAME} \
---out-dir ${OUTPUT_ROOT}/3_stent_cls_head_fine_tune_low_res
+# # -----------------------------
+# # 3. Stent classification head fine-tuning evaluation
+# # -----------------------------
+# python eval_classifier.py \
+# --weights outputs/train/vits16/3_stent_cls_head_fine_tune/best_model.pth \
+# --input input/stent_split_img/test \
+# --config classification_configs/stent.yaml \
+# --model-name ${MODEL_NAME} \
+# --out-dir ${OUTPUT_ROOT}/3_stent_cls_head_fine_tune
 
 # -----------------------------
 # 4. Stent classification full fine-tuning evaluation
 # -----------------------------
 python eval_classifier.py \
---weights outputs/train/vits16/4_stent_cls_full_fine_tune_low_res/best_model.pth \
+--weights outputs/train/vits16/4_stent_cls_full_fine_tune/best_model.pth \
 --input input/stent_split_img/test \
---config classification_configs/stent_low_res.yaml \
+--config classification_configs/stent.yaml \
 --model-name ${MODEL_NAME} \
---out-dir ${OUTPUT_ROOT}/4_stent_cls_full_fine_tune_low_res
+--out-dir ${OUTPUT_ROOT}/4_stent_cls_full_fine_tune

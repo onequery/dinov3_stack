@@ -5,29 +5,22 @@ Building a linear classifier on top of DINOv3 backbone.
 import torch
 import torch.nn as nn
 
-def load_model(weights: str=None, model_name: str=None, repo_dir: str=None):
+
+def load_model(weights: str = None, model_name: str = None, repo_dir: str = None):
     if weights is not None:
-        print('Loading pretrained backbone weights from: ', weights)
-        model = torch.hub.load(
-            repo_dir, 
-            model_name, 
-            source='local', 
-            weights=weights
-        )
+        print("Loading pretrained backbone weights from: ", weights)
+        model = torch.hub.load(repo_dir, model_name, source="local", weights=weights)
     else:
-        print('No pretrained weights path given. Loading with random weights.')
-        model = torch.hub.load(
-            repo_dir, 
-            model_name, 
-            source='local'
-        )
-    
+        print("No pretrained weights path given. Loading with random weights.")
+        model = torch.hub.load(repo_dir, model_name, source="local")
+
     return model
 
+
 # def build_model(
-#     num_classes: int=10, 
-#     fine_tune: bool=False, 
-#     weights: str=None, 
+#     num_classes: int=10,
+#     fine_tune: bool=False,
+#     weights: str=None,
 #     model_name: str=None,
 #     repo_dir: str=None
 # ):
@@ -38,26 +31,27 @@ def load_model(weights: str=None, model_name: str=None, repo_dir: str=None):
 #     model = torch.nn.Sequential(OrderedDict([
 #         ('backbone', backbone_model),
 #         ('head', torch.nn.Linear(
-#             in_features=backbone_model.norm.normalized_shape[0], 
-#             out_features=num_classes, 
+#             in_features=backbone_model.norm.normalized_shape[0],
+#             out_features=num_classes,
 #             bias=True
 #         ))
 #     ]))
-    
+
 #     if not fine_tune:
 #         for params in model.backbone.parameters():
 #             params.requires_grad = False
 
 #     return model
 
+
 class Dinov3Classification(nn.Module):
     def __init__(
-        self, 
-        fine_tune: bool=False, 
-        num_classes: int=2,
-        weights: str=None,
-        model_name: str=None,
-        repo_dir: str=None
+        self,
+        fine_tune: bool = False,
+        num_classes: int = 2,
+        weights: str = None,
+        model_name: str = None,
+        repo_dir: str = None,
     ):
         super(Dinov3Classification, self).__init__()
 
@@ -66,9 +60,9 @@ class Dinov3Classification(nn.Module):
         )
 
         self.head = nn.Linear(
-            in_features=self.backbone_model.norm.normalized_shape[0], 
-            out_features=num_classes, 
-            bias=True
+            in_features=self.backbone_model.norm.normalized_shape[0],
+            out_features=num_classes,
+            bias=True,
         )
 
         if not fine_tune:
@@ -81,7 +75,8 @@ class Dinov3Classification(nn.Module):
         classifier_out = self.head(features)
         return classifier_out
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     from PIL import Image
     from torchvision import transforms
     from torchinfo import summary
@@ -92,37 +87,36 @@ if __name__ == '__main__':
 
     DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
 
-    weight_file = 'dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth'
-    model_name = 'dinov3_convnext_tiny'
+    weight_file = "dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth"
+    model_name = "dinov3_convnext_tiny"
 
     sample_size = 224
 
     # Define image transformation
-    transform = transforms.Compose([
-        transforms.Resize(
-            sample_size, 
-            interpolation=transforms.InterpolationMode.BICUBIC
-        ),
-        transforms.CenterCrop(sample_size),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=(0.485, 0.456, 0.406), 
-            std=(0.229, 0.224, 0.225)
-        )
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.Resize(
+                sample_size, interpolation=transforms.InterpolationMode.BICUBIC
+            ),
+            transforms.CenterCrop(sample_size),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
 
     # Loading the pretrained model without classification head.
     model = load_model(
-        repo_dir=DINOV3_REPO, 
+        repo_dir=DINOV3_REPO,
         weights=os.path.join(DINOV3_WEIGHTS, weight_file),
-        model_name=model_name
+        model_name=model_name,
     )
 
     # Total parameters and trainable parameters.
     total_params = sum(p.numel() for p in model.parameters())
     print(f"{total_params:,} total parameters.")
     total_trainable_params = sum(
-        p.numel() for p in model.parameters() if p.requires_grad)
+        p.numel() for p in model.parameters() if p.requires_grad
+    )
     print(f"{total_trainable_params:,} training parameters.")
 
     # Testing forward pass.
@@ -139,7 +133,7 @@ if __name__ == '__main__':
     # Manual torch forward pass.
     with torch.no_grad():
         features = model.forward_features(model_input)
-        patch_features = features['x_norm_patchtokens']
+        patch_features = features["x_norm_patchtokens"]
 
     print(features.keys())
     print(f"Patch features shape: {patch_features.shape}")
@@ -149,16 +143,16 @@ if __name__ == '__main__':
     print(model)
 
     model_cls = Dinov3Classification(
-        repo_dir=DINOV3_REPO, 
+        repo_dir=DINOV3_REPO,
         weights=os.path.join(DINOV3_WEIGHTS, weight_file),
-        model_name=model_name
+        model_name=model_name,
     )
 
     summary(
         model_cls,
         input_data=model_input,
-        col_names=('input_size', 'output_size', 'num_params'),
-        row_settings=['var_names']
+        col_names=("input_size", "output_size", "num_params"),
+        row_settings=["var_names"],
     )
 
     features = model_cls.backbone_model(model_input)
