@@ -76,14 +76,33 @@ class Dinov3Classification(nn.Module):
         return classifier_out
 
 
+class Dinov3Backbone(nn.Module):
+    def __init__(
+        self,
+        weights: str = None,
+        model_name: str = None,
+        repo_dir: str = None,
+    ):
+        super(Dinov3Backbone, self).__init__()
+
+        self.backbone_model = load_model(
+            weights=weights, model_name=model_name, repo_dir=repo_dir
+        )
+
+    def forward(self, x):
+        features = self.backbone_model(x)
+        return features
+
+
 if __name__ == "__main__":
-    from PIL import Image
-    from torchvision import transforms
-    from torchinfo import summary
-    from src.utils.common import get_dinov3_paths
+    import os
 
     import numpy as np
-    import os
+    from PIL import Image
+    from torchinfo import summary
+    from torchvision import transforms
+
+    from src.utils.common import get_dinov3_paths
 
     DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
 

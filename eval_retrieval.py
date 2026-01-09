@@ -35,7 +35,7 @@ import yaml
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
-from src.img_cls.model import Dinov3Classification
+from src.img_cls.model import Dinov3Backbone
 from src.utils.common import get_dinov3_paths
 
 
@@ -106,8 +106,7 @@ transform = transforms.Compose(
 # --------------------------------------------------
 # Load model (backbone only)
 # --------------------------------------------------
-model = Dinov3Classification(
-    num_classes=1,  # dummy
+model = Dinov3Backbone(
     model_name=args.model_name,
     repo_dir=DINOV3_REPO,
 ).to(DEVICE)
@@ -141,7 +140,8 @@ for class_name in tqdm(sorted(os.listdir(args.input)), desc="Classes"):
         img = transform(img).unsqueeze(0).to(DEVICE)
 
         with torch.no_grad():
-            feat = model.forward_features(img)  # CLS token
+            feat = model.forward(img)  # backbone features
+            # TODO: Take only CLS token
             feat = l2_normalize(feat)
 
         features.append(feat.cpu())
