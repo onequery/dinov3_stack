@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 """
 Patient-ID Image–Image Retrieval Evaluation (DINOv3)
-
-Task:
-- Query: each image
-- Gallery: all other images
-- Positive: images with the same patient_id (8-digit folder name), excluding itself
-- Ignore: stent/no_stent, date, modality folders
-
-Protocol:
-- Frozen DINOv3 backbone
-- Global embedding = model(x) output (e.g., CLS pooled embedding)
-- L2 normalization
-- Cosine similarity via dot product
-
-Metrics:
-- Recall@K
-- mAP (queries with >=1 positive only)
-
-USAGE:
-python eval_retrieval.py \
-  --input input/stent_split_img/test \
-  --config configs_retrieval/patients.yaml \
-  --model-name dinov3_vits16 \
-  --repo-dir dinov3 \
-  --backbone-weights /path/to/dinov3_vits16_pretrain_*.pth \
-  --out-dir outputs/eval/pat_ret
-
-Notes:
-- If --backbone-weights is omitted, torch.hub may try to download weights depending on your hub entry;
-  in restricted environments this can fail (e.g., HTTP 403). Prefer providing local weights.
 """
 
 import argparse
@@ -40,6 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -68,16 +40,10 @@ _PATIENT_RE = re.compile(r"(^|[\\/])(\d{8})(?=([\\/]|$))")
 
 
 def extract_patient_id(path: str) -> str:
-    """
-    Find an 8-digit directory name anywhere in the path.
-    Example:
-      input/stent_split_img/test/no_stent/10003493/20060405/XA/004.png -> 10003493
-    """
     m = _PATIENT_RE.search(path)
     if not m:
         raise ValueError(
-            f"[ERROR] Could not find 8-digit patient_id folder in path:\n  {path}\n"
-            "Expected a directory named like '10003493' somewhere in the path."
+            f"[ERROR] Could not find 8-digit patient_id folder in path:\n{path}"
         )
     return m.group(2)
 
@@ -89,23 +55,11 @@ def l2_normalize(x: torch.Tensor) -> torch.Tensor:
 def load_dinov3_backbone(
     repo_dir: str, model_name: str, weights_path: Optional[str]
 ) -> torch.nn.Module:
-    """
-    Loads DINOv3 backbone via torch.hub.load(source='local').
-    If weights_path is provided, it should point to a local .pth file.
-    """
     if weights_path is not None:
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(
-                f"[ERROR] --backbone-weights not found: {weights_path}"
-            )
-        print(f"[INFO] Loading backbone with local weights: {weights_path}")
         model = torch.hub.load(
             repo_dir, model_name, source="local", weights=weights_path
         )
     else:
-        print(
-            "[WARN] No --backbone-weights provided. torch.hub may attempt to download weights."
-        )
         model = torch.hub.load(repo_dir, model_name, source="local")
     return model
 
@@ -117,7 +71,10 @@ def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compo
             transforms.Resize((resize_size, resize_size)),
             transforms.CenterCrop((center_crop_size, center_crop_size)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
         ]
     )
 
@@ -127,36 +84,15 @@ def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compo
 # -----------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--input",
-        required=True,
-        help="dataset root (contains stent/no_stent subfolders)",
-    )
-    parser.add_argument(
-        "--config", required=True, help="yaml with RESIZE_SIZE and CENTER_CROP_SIZE"
-    )
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--config", required=True)
     parser.add_argument("--model-name", default="dinov3_vits16")
-    parser.add_argument(
-        "--repo-dir",
-        default="dinov3",
-        help="path to cloned dinov3 repo for torch.hub.load",
-    )
-    parser.add_argument(
-        "--backbone-weights",
-        default=None,
-        help="local .pth for backbone weights (recommended)",
-    )
+    parser.add_argument("--repo-dir", default="dinov3")
+    parser.add_argument("--backbone-weights", default=None)
     parser.add_argument("--out-dir", default="outputs/eval_retrieval/patient_retrieval")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument(
-        "--k", type=int, nargs="+", default=[1, 5, 10], help="Recall@K list"
-    )
-    parser.add_argument(
-        "--max-topk-log",
-        type=int,
-        default=10,
-        help="how many top neighbors to log per query",
-    )
+    parser.add_argument("--k", type=int, nargs="+", default=[1, 5, 10])
+    parser.add_argument("--max-topk-log", type=int, default=10)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -165,121 +101,92 @@ def main():
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    if "RESIZE_SIZE" not in cfg or "CENTER_CROP_SIZE" not in cfg:
-        raise ValueError(
-            "[ERROR] config yaml must contain RESIZE_SIZE and CENTER_CROP_SIZE"
-        )
-
     resize_size = int(cfg["RESIZE_SIZE"])
     center_crop_size = int(cfg["CENTER_CROP_SIZE"])
     transform = build_transform(resize_size, center_crop_size)
 
-    # Collect images and labels (patient_id)
-    all_paths = collect_image_paths(args.input, exts=("png", "jpg", "jpeg"))
-    if len(all_paths) == 0:
-        raise RuntimeError(f"[FATAL] No images found under: {args.input}")
+    # Collect images
+    all_paths = collect_image_paths(args.input)
+    patient_ids = np.array([extract_patient_id(p) for p in all_paths])
 
-    patient_ids = []
-    for p in all_paths:
-        patient_ids.append(extract_patient_id(p))
-    patient_ids = np.array(patient_ids)
-
-    # Build patient -> indices for positives
-    patient_to_indices: Dict[str, np.ndarray] = {}
-    for pid in np.unique(patient_ids):
-        patient_to_indices[pid] = np.where(patient_ids == pid)[0]
+    patient_to_indices: Dict[str, np.ndarray] = {
+        pid: np.where(patient_ids == pid)[0] for pid in np.unique(patient_ids)
+    }
 
     # Load backbone
     backbone = load_dinov3_backbone(
         args.repo_dir, args.model_name, args.backbone_weights
     ).to(device)
     backbone.eval()
-    for param in backbone.parameters():
-        param.requires_grad = False
+    for p in backbone.parameters():
+        p.requires_grad = False
 
-    # Feature extraction (batched)
-    print("\n[INFO] Extracting features...\n")
+    # Feature extraction
     feats_list: List[torch.Tensor] = []
+    bs = max(1, args.batch_size)
 
-    bs = max(1, int(args.batch_size))
     with torch.no_grad():
-        for start in tqdm(range(0, len(all_paths), bs), desc="Batches"):
-            batch_paths = all_paths[start : start + bs]
+        for start in tqdm(range(0, len(all_paths), bs), desc="Extracting"):
             batch_imgs = []
-            for p in batch_paths:
-                img = cv2.imread(p)
-                if img is None:
-                    raise RuntimeError(f"[ERROR] Failed to read image: {p}")
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            for p in all_paths[start : start + bs]:
+                img = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
                 batch_imgs.append(transform(img))
-            x = torch.stack(batch_imgs, dim=0).to(device)  # (B,3,H,W)
-
-            # DINOv3 hub backbones typically return a global embedding when called as model(x)
-            emb = backbone(x)  # (B, D)
-            if emb.ndim != 2:
-                raise RuntimeError(
-                    f"[ERROR] Unexpected backbone output shape: {tuple(emb.shape)}. "
-                    "Expected (B, D). You may need to adjust how embeddings are extracted."
-                )
-            emb = l2_normalize(emb).detach().cpu()  # normalize on GPU then move to CPU
+            x = torch.stack(batch_imgs).to(device)
+            emb = l2_normalize(backbone(x)).cpu()
             feats_list.append(emb)
 
-    features = torch.cat(feats_list, dim=0)  # (N, D) on CPU
+    features = torch.cat(feats_list, dim=0)
     n, d = features.shape
-    print(f"[INFO] Features shape: {features.shape} (N={n}, D={d})")
-    print(f"[INFO] Unique patients: {len(np.unique(patient_ids))}")
 
-    # Retrieval evaluation (no full NxN matrix; per-query dot)
+    # Retrieval evaluation
     K_LIST = sorted(set(int(k) for k in args.k))
-    max_k = max(K_LIST)
-    topk_log = max(1, int(args.max_topk_log))
-
     recall_hits = {k: [] for k in K_LIST}
     ap_list: List[float] = []
     ap_valid_mask: List[bool] = []
 
     per_query_rows = []
 
-    print("\n[INFO] Running retrieval evaluation...\n")
-
-    features_t = features.t().contiguous()  # (D, N) for faster matmul
+    first_positive_ranks: List[int] = []
+    positive_sims: List[float] = []
+    negative_sims: List[float] = []
 
     for i in tqdm(range(n), desc="Queries"):
         pid = patient_ids[i]
         pos_idx = patient_to_indices[pid]
-        # exclude self
         pos_idx = pos_idx[pos_idx != i]
 
-        # similarity to all (cosine since L2 normalized)
-        # sims: (N,)
-        sims = torch.mv(features, features[i])  # dot(features[j], features[i])
-        sims[i] = -1e9  # remove self match
-
-        # rank
+        sims = torch.mv(features, features[i])
+        sims[i] = -1e9
         sorted_idx = torch.argsort(sims, descending=True)
-        topk_idx = sorted_idx[:max_k].numpy()
 
-        # Recall@K
         for k in K_LIST:
-            hit = int(np.isin(topk_idx[:k], pos_idx).any()) if len(pos_idx) > 0 else 0
+            hit = int(
+                len(pos_idx) > 0 and np.isin(sorted_idx[:k].numpy(), pos_idx).any()
+            )
             recall_hits[k].append(hit)
 
-        # AP (skip queries with no positives)
         if len(pos_idx) == 0:
             ap = np.nan
             ap_valid = False
         else:
             y_true = np.zeros(n, dtype=np.int32)
             y_true[pos_idx] = 1
-            # sklearn expects scores aligned with y_true (same length)
             ap = float(average_precision_score(y_true, sims.numpy()))
             ap_valid = True
             ap_list.append(ap)
 
+            for rank, idx in enumerate(sorted_idx.tolist(), start=1):
+                if idx in pos_idx:
+                    first_positive_ranks.append(rank)
+                    break
+
+            positive_sims.extend(sims[pos_idx].tolist())
+            neg_mask = patient_ids != pid
+            negative_sims.extend(sims[neg_mask].tolist())
+
         ap_valid_mask.append(ap_valid)
 
-        # Log top neighbors
-        nn_idx = sorted_idx[:topk_log].numpy()
+        nn_idx = sorted_idx[: args.max_topk_log].numpy()
         nn_paths = [all_paths[j] for j in nn_idx]
         nn_pids = [patient_ids[j] for j in nn_idx]
         nn_sims = [float(sims[j].item()) for j in nn_idx]
@@ -304,16 +211,10 @@ def main():
             }
         )
 
-    # Aggregate metrics
     results = {f"Recall@{k}": float(np.mean(recall_hits[k])) for k in K_LIST}
-    if len(ap_list) > 0:
-        results["mAP"] = float(np.mean(ap_list))
-    else:
-        results["mAP"] = float("nan")
-
+    results["mAP"] = float(np.mean(ap_list)) if len(ap_list) > 0 else float("nan")
     num_no_pos = int(np.sum(np.array(ap_valid_mask) == 0))
 
-    # Save outputs
     os.makedirs(args.out_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -328,21 +229,76 @@ def main():
             f"Weights: {args.backbone_weights if args.backbone_weights else '(torch.hub default)'}\n"
         )
         f.write(f"Dataset: {args.input}\n")
-        f.write(f"Resize/CenterCrop: {resize_size}/{center_crop_size}\n")
         f.write(f"N images: {n}\n")
         f.write(f"Embedding dim: {d}\n")
         f.write(f"Unique patients: {len(np.unique(patient_ids))}\n")
-        f.write(f"Queries with no positives (patient has 1 image): {num_no_pos}\n\n")
+        f.write(f"Queries with no positives: {num_no_pos}\n\n")
         for k, v in results.items():
             f.write(f"{k}: {v:.4f}\n")
 
     pd.DataFrame(per_query_rows).to_csv(per_query_csv, index=False)
 
-    # Console
+    # ===== Per-query Retrieval Rank Plot (CDF) =====
+    ranks = np.array(first_positive_ranks)
+    max_rank = int(np.percentile(ranks, 95))
+    xs = np.arange(1, max_rank + 1)
+    ys = [(ranks <= x).mean() for x in xs]
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(xs, ys, linewidth=2)
+    plt.xlabel("First Positive Rank")
+    plt.ylabel("Query Ratio (CDF)")
+    plt.title("Per-query Retrieval Rank (CDF)")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    cdf_path = os.path.join(
+        args.out_dir, f"per_query_retrieval_rank_cdf_{timestamp}.png"
+    )
+    plt.savefig(cdf_path, dpi=300)
+    plt.close()
+
+    # ===== Positive vs Negative Similarity Distribution =====
+    plt.figure(figsize=(8, 6))
+    plt.hist(positive_sims, bins=100, density=True, alpha=0.6, label="Positive")
+    plt.hist(negative_sims, bins=100, density=True, alpha=0.6, label="Negative")
+    plt.xlabel("Cosine Similarity")
+    plt.ylabel("Density")
+    plt.title("Positive vs Negative Similarity Distribution")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    simdist_path = os.path.join(
+        args.out_dir, f"positive_vs_negative_similarity_{timestamp}.png"
+    )
+    plt.savefig(simdist_path, dpi=300)
+    plt.close()
+
+    # ===== Query-wise AP Distribution =====
+    plt.figure(figsize=(8, 6))
+    plt.hist(ap_list, bins=30, density=True, alpha=0.75)
+    plt.xlabel("Average Precision (AP)")
+    plt.ylabel("Density")
+    plt.title("Query-wise AP Distribution")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+
+    apdist_path = os.path.join(
+        args.out_dir, f"query_wise_ap_distribution_{timestamp}.png"
+    )
+    plt.savefig(apdist_path, dpi=300)
+    plt.close()
+
     print("\n========== Retrieval Results ==========")
     for k, v in results.items():
         print(f"{k}: {v:.4f}")
-    print(f"\n[Saved]\n- {summary_path}\n- {per_query_csv}")
+    print("\n[Saved]")
+    print(f"- {summary_path}")
+    print(f"- {per_query_csv}")
+    print(f"- {cdf_path}")
+    print(f"- {simdist_path}")
+    print(f"- {apdist_path}")
 
 
 if __name__ == "__main__":

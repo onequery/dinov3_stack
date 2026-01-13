@@ -1,4 +1,4 @@
-#!bin/bash
+#!/bin/bash
 
 # python eval_classifier.py \
 # --weights outputs/transfer_learn/best_model.pth \
