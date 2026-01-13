@@ -57,5 +57,23 @@
                 "outputs/eval/stent_cls/"
             ]
         },
+        {
+            "name": "Python Debugger: eval_retrieval.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_retrieval.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--input",
+                "input/stent_split_img/test/",
+                "--config",
+                "configs_retrieval/patients.yaml",
+                "--model-name",
+                "dinov3_vits16",
+                "--out-dir",
+                "outputs/eval/pat_ret/"
+            ]
+        },
     ]
 }
