@@ -8,10 +8,10 @@ import argparse
 import os
 import random
 import re
-from datetime import datetime
 from typing import List
 
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
@@ -32,7 +32,6 @@ random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
-
 
 # -------------------------
 # Utils
@@ -59,21 +58,15 @@ class RetrievalDataset(Dataset):
         self.paths = []
         for ext in ("png", "jpg", "jpeg"):
             self.paths.extend(
-                list(
-                    p
-                    for p in sorted(
-                        glob
-                        for glob in __import__("glob").glob(
-                            os.path.join(root_dir, "**", f"*.{ext}"), recursive=True
-                        )
-                    )
+                __import__("glob").glob(
+                    os.path.join(root_dir, "**", f"*.{ext}"), recursive=True
                 )
             )
 
+        self.paths = sorted(self.paths)
         self.transform = transform
         self.patient_ids = [extract_patient_id(p) for p in self.paths]
 
-        # map patient_id -> integer label
         unique_ids = sorted(set(self.patient_ids))
         self.pid_to_label = {pid: i for i, pid in enumerate(unique_ids)}
         self.labels = [self.pid_to_label[pid] for pid in self.patient_ids]
@@ -109,8 +102,8 @@ class Dinov3Retrieval(nn.Module):
                 p.requires_grad = False
 
     def forward(self, x):
-        feat = self.backbone(x)  # (B, D)
-        z = self.projector(feat)  # (B, d)
+        feat = self.backbone(x)
+        z = self.projector(feat)
         z = l2_normalize(z)
         return z
 
@@ -141,45 +134,55 @@ class SupConLoss(nn.Module):
         mask = mask * logits_mask
         mean_log_prob_pos = (mask * log_prob).sum(dim=1) / (mask.sum(dim=1) + 1e-12)
 
-        loss = -mean_log_prob_pos.mean()
-        return loss
+        return -mean_log_prob_pos.mean()
 
 
 # -------------------------
-# Training
+# Training / Validation
 # -------------------------
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    running_loss = 0.0
+    losses = []
 
     for imgs, labels in tqdm(loader, desc="Train", leave=False):
-        imgs = imgs.to(device)
-        labels = labels.to(device)
-
+        imgs, labels = imgs.to(device), labels.to(device)
         optimizer.zero_grad()
         z = model(imgs)
         loss = criterion(z, labels)
         loss.backward()
         optimizer.step()
+        losses.append(loss.item())
 
-        running_loss += loss.item()
-
-    return running_loss / len(loader)
+    return float(np.mean(losses))
 
 
-def validate(model, loader, criterion, device):
+@torch.no_grad()
+def compute_recall_at_k(model, loader, device, ks=(1, 5)):
     model.eval()
-    running_loss = 0.0
+    feats, labels = [], []
 
-    with torch.no_grad():
-        for imgs, labels in tqdm(loader, desc="Valid", leave=False):
-            imgs = imgs.to(device)
-            labels = labels.to(device)
-            z = model(imgs)
-            loss = criterion(z, labels)
-            running_loss += loss.item()
+    for imgs, lbls in loader:
+        imgs = imgs.to(device)
+        z = model(imgs)
+        feats.append(z.cpu())
+        labels.append(lbls)
 
-    return running_loss / len(loader)
+    feats = torch.cat(feats, dim=0)
+    labels = torch.cat(labels, dim=0)
+    sims = feats @ feats.T
+    sims.fill_diagonal_(-1e9)
+
+    sorted_idx = torch.argsort(sims, dim=1, descending=True)
+    recalls = {k: [] for k in ks}
+
+    for i in range(len(labels)):
+        pos = labels == labels[i]
+        pos[i] = False
+        for k in ks:
+            hit = pos[sorted_idx[i, :k]].any().item()
+            recalls[k].append(hit)
+
+    return {k: float(np.mean(v)) for k, v in recalls.items()}
 
 
 # -------------------------
@@ -200,8 +203,8 @@ def main():
     parser.add_argument("--weights", required=True)
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.out_dir, exist_ok=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -212,19 +215,18 @@ def main():
             transforms.Resize((cfg["RESIZE_SIZE"], cfg["RESIZE_SIZE"])),
             transforms.CenterCrop(cfg["CENTER_CROP_SIZE"]),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
         ]
     )
 
     train_set = RetrievalDataset(args.train_dir, transform)
     valid_set = RetrievalDataset(args.valid_dir, transform)
 
-    train_loader = DataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True, num_workers=4
-    )
-    valid_loader = DataLoader(
-        valid_set, batch_size=args.batch_size, shuffle=False, num_workers=4
-    )
+    train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=4)
+    valid_loader = DataLoader(valid_set, args.batch_size, shuffle=False, num_workers=4)
 
     DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
     backbone = torch.hub.load(
@@ -235,38 +237,52 @@ def main():
     ).to(device)
 
     feat_dim = backbone.norm.normalized_shape[0]
-
-    model = Dinov3Retrieval(
-        backbone=backbone,
-        feat_dim=feat_dim,
-        proj_dim=args.proj_dim,
-        fine_tune=args.fine_tune,
-    ).to(device)
+    model = Dinov3Retrieval(backbone, feat_dim, args.proj_dim, args.fine_tune).to(
+        device
+    )
 
     criterion = SupConLoss()
     optimizer = optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
     )
 
-    best_loss = float("inf")
+    train_losses, val_losses = [], []
+    r1_list, r5_list = [], []
 
-    # TODO: Training visualizations
     for epoch in range(args.epochs):
         print(f"\nEpoch [{epoch+1}/{args.epochs}]")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss = validate(model, valid_loader, criterion, device)
+        recalls = compute_recall_at_k(model, valid_loader, device)
 
-        print(f"Train Loss: {train_loss:.4f} | Valid Loss: {val_loss:.4f}")
+        train_losses.append(train_loss)
+        r1_list.append(recalls[1])
+        r5_list.append(recalls[5])
 
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(
-                {"model": model.state_dict()},
-                os.path.join(args.out_dir, "best_retrieval_model.pth"),
-            )
-            print("✓ Saved best model")
+        print(
+            f"Train Loss: {train_loss:.4f} | "
+            f"R@1: {recalls[1]:.4f} | R@5: {recalls[5]:.4f}"
+        )
 
-    print("Training finished.")
+    # -------------------------
+    # Plot curves
+    # -------------------------
+    plt.figure()
+    plt.plot(train_losses, label="Train Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.savefig(os.path.join(args.out_dir, "loss_curve.png"))
+
+    plt.figure()
+    plt.plot(r1_list, label="Recall@1")
+    plt.plot(r5_list, label="Recall@5")
+    plt.xlabel("Epoch")
+    plt.ylabel("Recall")
+    plt.legend()
+    plt.savefig(os.path.join(args.out_dir, "recall_curve.png"))
+
+    print("\nTraining finished.")
+    print(f"[Saved] loss_curve.png, recall_curve.png")
 
 
 if __name__ == "__main__":
