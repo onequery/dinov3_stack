@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Patient-ID Image–Image Retrieval Evaluation (DINOv3)
+Patient-ID Image–Image Retrieval Evaluation
+(using trained DINOv3 + projection head)
 """
 
 import argparse
@@ -8,27 +9,36 @@ import glob
 import os
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-
+from typing import Dict, List, Tuple
+import pandas as pd
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import yaml
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
-
 # -----------------------------
 # Utils
 # -----------------------------
+_PATIENT_RE = re.compile(r"(^|[\\/])(\d{8})(?=([\\/]|$))")
+
+
+def extract_patient_id(path: str) -> str:
+    m = _PATIENT_RE.search(path)
+    if not m:
+        raise ValueError(f"Cannot extract patient id from: {path}")
+    return m.group(2)
+
+
 def collect_image_paths(
     root_dir: str, exts: Tuple[str, ...] = ("png", "jpg", "jpeg")
 ) -> List[str]:
-    paths: List[str] = []
+    paths = []
     for ext in exts:
         paths.extend(
             glob.glob(os.path.join(root_dir, "**", f"*.{ext}"), recursive=True)
@@ -36,35 +46,11 @@ def collect_image_paths(
     return sorted(paths)
 
 
-_PATIENT_RE = re.compile(r"(^|[\\/])(\d{8})(?=([\\/]|$))")
-
-
-def extract_patient_id(path: str) -> str:
-    m = _PATIENT_RE.search(path)
-    if not m:
-        raise ValueError(
-            f"[ERROR] Could not find 8-digit patient_id folder in path:\n{path}"
-        )
-    return m.group(2)
-
-
 def l2_normalize(x: torch.Tensor) -> torch.Tensor:
     return F.normalize(x, dim=1)
 
 
-def load_dinov3_backbone(
-    repo_dir: str, model_name: str, weights_path: Optional[str]
-) -> torch.nn.Module:
-    if weights_path is not None:
-        model = torch.hub.load(
-            repo_dir, model_name, source="local", weights=weights_path
-        )
-    else:
-        model = torch.hub.load(repo_dir, model_name, source="local")
-    return model
-
-
-def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compose:
+def build_transform(resize_size: int, center_crop_size: int):
     return transforms.Compose(
         [
             transforms.ToPILImage(),
@@ -80,6 +66,28 @@ def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compo
 
 
 # -----------------------------
+# Model
+# -----------------------------
+class Dinov3Retrieval(nn.Module):
+    def __init__(self, model_name, feat_dim=384, proj_dim=128):
+        super().__init__()
+        repo_dir = "dinov3"
+        self.backbone = torch.hub.load(repo_dir, model_name, source="local")
+
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.BatchNorm1d(feat_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(feat_dim, proj_dim),
+        )
+
+    def forward(self, x):
+        feat = self.backbone(x)
+        z = self.projector(feat)
+        return l2_normalize(z)
+
+
+# -----------------------------
 # Main
 # -----------------------------
 def main():
@@ -87,25 +95,25 @@ def main():
     parser.add_argument("--input", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--model-name", default="dinov3_vits16")
-    parser.add_argument("--repo-dir", default="dinov3")
-    parser.add_argument("--backbone-weights", default=None)
-    parser.add_argument("--out-dir", default="outputs/eval_retrieval/patient_retrieval")
+    parser.add_argument("--weights", required=True, help="best_model.pth")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--k", type=int, nargs="+", default=[1, 5, 10])
-    parser.add_argument("--max-topk-log", type=int, default=10)
+    parser.add_argument("--out-dir", required=True)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # -----------------------------
     # Load config
+    # -----------------------------
     with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    resize_size = int(cfg["RESIZE_SIZE"])
-    center_crop_size = int(cfg["CENTER_CROP_SIZE"])
-    transform = build_transform(resize_size, center_crop_size)
+    transform = build_transform(cfg["RESIZE_SIZE"], cfg["CENTER_CROP_SIZE"])
 
-    # Collect images
+    # -----------------------------
+    # Load images
+    # -----------------------------
     all_paths = collect_image_paths(args.input)
     patient_ids = np.array([extract_patient_id(p) for p in all_paths])
 
@@ -113,42 +121,49 @@ def main():
         pid: np.where(patient_ids == pid)[0] for pid in np.unique(patient_ids)
     }
 
-    # Load backbone
-    backbone = load_dinov3_backbone(
-        args.repo_dir, args.model_name, args.backbone_weights
-    ).to(device)
-    backbone.eval()
-    for p in backbone.parameters():
+    # -----------------------------
+    # Load trained model
+    # -----------------------------
+    ckpt = torch.load(args.weights, map_location=device)
+    model = Dinov3Retrieval(model_name=args.model_name).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    for p in model.parameters():
         p.requires_grad = False
 
+    # -----------------------------
     # Feature extraction
-    feats_list: List[torch.Tensor] = []
+    # -----------------------------
+    feats_list = []
     bs = max(1, args.batch_size)
 
     with torch.no_grad():
         for start in tqdm(range(0, len(all_paths), bs), desc="Extracting"):
-            batch_imgs = []
+            imgs = []
             for p in all_paths[start : start + bs]:
                 img = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
-                batch_imgs.append(transform(img))
-            x = torch.stack(batch_imgs).to(device)
-            emb = l2_normalize(backbone(x)).cpu()
+                imgs.append(transform(img))
+            x = torch.stack(imgs).to(device)
+            emb = model(x).cpu()
             feats_list.append(emb)
 
     features = torch.cat(feats_list, dim=0)
     n, d = features.shape
 
+    # -----------------------------
     # Retrieval evaluation
-    K_LIST = sorted(set(int(k) for k in args.k))
+    # -----------------------------
+    K_LIST = sorted(set(args.k))
     recall_hits = {k: [] for k in K_LIST}
-    ap_list: List[float] = []
-    ap_valid_mask: List[bool] = []
+    ap_list = []
+    ap_valid_mask = []
+
+    first_positive_ranks = []
+    positive_sims, negative_sims = [], []
 
     per_query_rows = []
-
-    first_positive_ranks: List[int] = []
-    positive_sims: List[float] = []
-    negative_sims: List[float] = []
+    topk_rows = []
 
     for i in tqdm(range(n), desc="Queries"):
         pid = patient_ids[i]
@@ -159,75 +174,106 @@ def main():
         sims[i] = -1e9
         sorted_idx = torch.argsort(sims, descending=True)
 
+        query_recalls = {}
+
         for k in K_LIST:
             hit = int(
                 len(pos_idx) > 0 and np.isin(sorted_idx[:k].numpy(), pos_idx).any()
             )
             recall_hits[k].append(hit)
+            query_recalls[f"R@{k}"] = hit
 
         if len(pos_idx) == 0:
-            ap = np.nan
-            ap_valid = False
-        else:
-            y_true = np.zeros(n, dtype=np.int32)
-            y_true[pos_idx] = 1
-            ap = float(average_precision_score(y_true, sims.numpy()))
-            ap_valid = True
-            ap_list.append(ap)
+            ap_valid_mask.append(False)
+            per_query_rows.append(
+                dict(
+                    query_index=i,
+                    query_path=all_paths[i],
+                    patient_id=pid,
+                    num_positives=0,
+                    first_positive_rank=None,
+                    AP=None,
+                    **query_recalls,
+                    top1_path=None,
+                    top1_pid=None,
+                    top1_sim=None,
+                    top1_is_positive=None,
+                )
+            )
+            continue
 
-            for rank, idx in enumerate(sorted_idx.tolist(), start=1):
-                if idx in pos_idx:
-                    first_positive_ranks.append(rank)
-                    break
+        ap_valid_mask.append(True)
 
-            positive_sims.extend(sims[pos_idx].tolist())
-            neg_mask = patient_ids != pid
-            negative_sims.extend(sims[neg_mask].tolist())
+        y_true = np.zeros(n, dtype=np.int32)
+        y_true[pos_idx] = 1
+        ap = float(average_precision_score(y_true, sims.numpy()))
+        ap_list.append(ap)
 
-        ap_valid_mask.append(ap_valid)
+        first_rank = None
+        for rank, idx in enumerate(sorted_idx.tolist(), start=1):
+            if idx in pos_idx:
+                first_positive_ranks.append(rank)
+                first_rank = rank
+                break
 
-        nn_idx = sorted_idx[: args.max_topk_log].numpy()
-        nn_paths = [all_paths[j] for j in nn_idx]
-        nn_pids = [patient_ids[j] for j in nn_idx]
-        nn_sims = [float(sims[j].item()) for j in nn_idx]
-        nn_is_pos = [int(patient_ids[j] == pid) for j in nn_idx]
+        for r, j in enumerate(sorted_idx[: max(K_LIST)].tolist(), start=1):
+            topk_rows.append(
+                dict(
+                    query_index=i,
+                    query_path=all_paths[i],
+                    query_patient_id=pid,
+                    rank=r,
+                    retrieved_path=all_paths[j],
+                    retrieved_patient_id=patient_ids[j],
+                    similarity=float(sims[j]),
+                    is_positive=int(j in pos_idx),
+                )
+            )
 
+        top1 = sorted_idx[0].item()
         per_query_rows.append(
-            {
-                "query_index": i,
-                "query_path": all_paths[i],
-                "patient_id": pid,
-                "num_positives": int(len(patient_to_indices[pid]) - 1),
-                "AP": ap,
-                **{f"R@{k}": recall_hits[k][-1] for k in K_LIST},
-                "top1_path": nn_paths[0] if len(nn_paths) > 0 else "",
-                "top1_patient_id": nn_pids[0] if len(nn_pids) > 0 else "",
-                "top1_sim": nn_sims[0] if len(nn_sims) > 0 else np.nan,
-                "top1_is_positive": nn_is_pos[0] if len(nn_is_pos) > 0 else 0,
-                "nn_paths": " | ".join(nn_paths),
-                "nn_patient_ids": " | ".join(nn_pids),
-                "nn_sims": " | ".join([f"{v:.6f}" for v in nn_sims]),
-                "nn_is_positive": " | ".join([str(v) for v in nn_is_pos]),
-            }
+            dict(
+                query_index=i,
+                query_path=all_paths[i],
+                patient_id=pid,
+                num_positives=len(pos_idx),
+                first_positive_rank=first_rank,
+                AP=ap,
+                **query_recalls,
+                top1_path=all_paths[top1],
+                top1_pid=patient_ids[top1],
+                top1_sim=float(sims[top1]),
+                top1_is_positive=int(top1 in pos_idx),
+            )
         )
 
-    results = {f"Recall@{k}": float(np.mean(recall_hits[k])) for k in K_LIST}
-    results["mAP"] = float(np.mean(ap_list)) if len(ap_list) > 0 else float("nan")
-    num_no_pos = int(np.sum(np.array(ap_valid_mask) == 0))
+        positive_sims.extend(sims[pos_idx].tolist())
+        negative_sims.extend(sims[patient_ids != pid].tolist())
 
+    # -----------------------------
+    # Save results & plots
+    # -----------------------------
     os.makedirs(args.out_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    summary_path = os.path.join(args.out_dir, f"retrieval_result_{timestamp}.txt")
-    per_query_csv = os.path.join(args.out_dir, f"per_query_{timestamp}.csv")
+    pd.DataFrame(per_query_rows).to_csv(
+        os.path.join(args.out_dir, f"per_query_{timestamp}.csv"), index=False
+    )
+    pd.DataFrame(topk_rows).to_csv(
+        os.path.join(args.out_dir, f"topk_retrieval_{timestamp}.csv"), index=False
+    )
 
-    with open(summary_path, "w") as f:
+    results = {f"Recall@{k}": float(np.mean(recall_hits[k])) for k in K_LIST}
+    results["mAP"] = float(np.mean(ap_list)) if len(ap_list) > 0 else float("nan")
+
+    num_no_pos = int(np.sum(np.array(ap_valid_mask) == 0))
+
+    # ----- Summary -----
+    with open(os.path.join(args.out_dir, f"summary_{timestamp}.txt"), "w") as f:
         f.write("========== Patient Retrieval Evaluation ==========\n")
         f.write(f"Model: {args.model_name}\n")
-        f.write(f"Repo: {args.repo_dir}\n")
-        f.write(
-            f"Weights: {args.backbone_weights if args.backbone_weights else '(torch.hub default)'}\n"
-        )
+        f.write("Repo: dinov3\n")
+        f.write(f"Weights: {args.weights}\n")
         f.write(f"Dataset: {args.input}\n")
         f.write(f"N images: {n}\n")
         f.write(f"Embedding dim: {d}\n")
@@ -236,9 +282,7 @@ def main():
         for k, v in results.items():
             f.write(f"{k}: {v:.4f}\n")
 
-    pd.DataFrame(per_query_rows).to_csv(per_query_csv, index=False)
-
-    # ===== Per-query Retrieval Rank Plot (CDF) =====
+    # ----- Per-query Retrieval Rank CDF -----
     ranks = np.array(first_positive_ranks)
     max_rank = int(np.percentile(ranks, 95))
     xs = np.arange(1, max_rank + 1)
@@ -251,14 +295,10 @@ def main():
     plt.title("Per-query Retrieval Rank (CDF)")
     plt.grid(alpha=0.3)
     plt.tight_layout()
-
-    cdf_path = os.path.join(
-        args.out_dir, f"per_query_retrieval_rank_cdf_{timestamp}.png"
-    )
-    plt.savefig(cdf_path, dpi=300)
+    plt.savefig(os.path.join(args.out_dir, f"rank_cdf_{timestamp}.png"), dpi=300)
     plt.close()
 
-    # ===== Positive vs Negative Similarity Distribution =====
+    # ----- Positive vs Negative Similarity -----
     plt.figure(figsize=(8, 6))
     plt.hist(positive_sims, bins=100, density=True, alpha=0.6, label="Positive")
     plt.hist(negative_sims, bins=100, density=True, alpha=0.6, label="Negative")
@@ -268,14 +308,10 @@ def main():
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
-
-    simdist_path = os.path.join(
-        args.out_dir, f"positive_vs_negative_similarity_{timestamp}.png"
-    )
-    plt.savefig(simdist_path, dpi=300)
+    plt.savefig(os.path.join(args.out_dir, f"sim_dist_{timestamp}.png"), dpi=300)
     plt.close()
 
-    # ===== Query-wise AP Distribution =====
+    # ----- Query-wise AP Distribution -----
     plt.figure(figsize=(8, 6))
     plt.hist(ap_list, bins=30, density=True, alpha=0.75)
     plt.xlabel("Average Precision (AP)")
@@ -283,22 +319,13 @@ def main():
     plt.title("Query-wise AP Distribution")
     plt.grid(alpha=0.3)
     plt.tight_layout()
-
-    apdist_path = os.path.join(
-        args.out_dir, f"query_wise_ap_distribution_{timestamp}.png"
-    )
-    plt.savefig(apdist_path, dpi=300)
+    plt.savefig(os.path.join(args.out_dir, f"ap_dist_{timestamp}.png"), dpi=300)
     plt.close()
 
     print("\n========== Retrieval Results ==========")
     for k, v in results.items():
         print(f"{k}: {v:.4f}")
-    print("\n[Saved]")
-    print(f"- {summary_path}")
-    print(f"- {per_query_csv}")
-    print(f"- {cdf_path}")
-    print(f"- {simdist_path}")
-    print(f"- {apdist_path}")
+    print(f"[Saved] summary + CDF + sim dist + AP dist → {args.out_dir}")
 
 
 if __name__ == "__main__":

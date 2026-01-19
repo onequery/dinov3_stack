@@ -205,6 +205,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -248,20 +249,37 @@ def main():
 
     train_losses, val_losses = [], []
     r1_list, r5_list = [], []
+    best_r1 = -1.0
 
     for epoch in range(args.epochs):
         print(f"\nEpoch [{epoch+1}/{args.epochs}]")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
         recalls = compute_recall_at_k(model, valid_loader, device)
 
+        r1, r5 = recalls[1], recalls[5]
+
         train_losses.append(train_loss)
-        r1_list.append(recalls[1])
-        r5_list.append(recalls[5])
+        r1_list.append(r1)
+        r5_list.append(r5)
 
         print(
             f"Train Loss: {train_loss:.4f} | "
             f"R@1: {recalls[1]:.4f} | R@5: {recalls[5]:.4f}"
         )
+
+        # -------- Best model by Recall@1 --------
+        if r1 > best_r1:
+            best_r1 = r1
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "recall@1": r1,
+                    "recall@5": r5,
+                },
+                os.path.join(args.out_dir, "best_model.pth"),
+            )
+            print(f"✓ Saved best model (Recall@1={r1:.4f})")
 
     # -------------------------
     # Plot curves
@@ -282,7 +300,7 @@ def main():
     plt.savefig(os.path.join(args.out_dir, "recall_curve.png"))
 
     print("\nTraining finished.")
-    print(f"[Saved] loss_curve.png, recall_curve.png")
+    print("[Saved] best_model.pth, loss_curve.png, recall_curve.png")
 
 
 if __name__ == "__main__":
