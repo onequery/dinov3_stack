@@ -1,0 +1,103 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: img_cls.model (module)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.img_cls.model",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Python Debugger: infer_classifier",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/infer_classifier.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--weights",
+                "outputs/transfer_learn/best_model.pth",
+                "--config",
+                "classification_configs/cards.yaml",
+                "--model-name",
+                "dinov3_convnext_tiny",
+                "--repo-dir",
+                "dinov3",
+                "--input",
+                "input/inference_data/"
+            ]
+        },
+        {
+            "name": "Python Debugger: export_dicom_frame.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/export_dicom_frame.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+        },
+        {
+            "name": "Python Debugger: eval_classifier.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_classifier.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--weights",
+                "outputs/train/stent_cls/best_model.pth",
+                "--input",
+                "input/stent_split_img/test/",
+                "--config",
+                "classification_configs/stent.yaml",
+                "--model-name",
+                "dinov3_convnext_tiny",
+                "--out-dir",
+                "outputs/eval/stent_cls/"
+            ]
+        },
+        {
+            "name": "Python Debugger: eval_retrieval.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/eval_retrieval.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--input",
+                "input/stent_split_img/test/",
+                "--config",
+                "configs_retrieval/patients.yaml",
+                "--model-name",
+                "dinov3_vits16",
+                "--out-dir",
+                "outputs/eval/pat_ret/"
+            ]
+        },
+        {
+            "name": "Python Debugger: train_retrieval.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/train_retrieval.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--train-dir",
+                "input/stent_split_img/train/",
+                "--valid-dir",
+                "input/stent_split_img/valid/",
+                "--config",
+                "configs_retrieval/patients.yaml",
+                "--epoch",
+                "10",
+                "--out-dir",
+                "outputs/train/dinov3_vits16/ret/head_fine_tune",
+                "--model-name",
+                "dinov3_vits16",
+                "--weights",
+                "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+            ]
+        },
+    ]
+}
