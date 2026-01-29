@@ -61,8 +61,9 @@ MODEL_NAME=dinov3_vits16
 # -----------------------------
 # Stent classification head fine-tuning
 # -----------------------------
-# OUT2=outputs/train/vits16/3_stent_cls_head_fine_tune
-OUT2=outputs/train/vits16/3_stent_cls_head_fine_tune_low_res
+OUT2=outputs/train/${MODEL_NAME}/1_lvd1689m/1_cls/1_stent_head_fine_tune
+# OUT2=outputs/train/${MODEL_NAME}/2_imagenet1k/1_cls/1_stent_head_fine_tune
+# OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/1_stent_head_fine_tune
 mkdir -p "$OUT2"
 
 # 실행 시작 시각 로그
@@ -71,14 +72,16 @@ echo "==== START Stent Classification Head Fine-tuning: $(date) ====" | tee -a "
 echo "========================================" | tee -a "$OUT2/train.log"
 
 stdbuf -oL -eL python train_classifier.py \
-  --train-dir input/stent_split_img/train/ \
-  --valid-dir input/stent_split_img/valid/ \
+  --train-dir input/stent_split_img_first_frame/train/ \
+  --valid-dir input/stent_split_img_first_frame/valid/ \
   --weights "$WEIGHTS_FILENAME" \
   --repo-dir dinov3 \
   --model-name "$MODEL_NAME" \
-  --epochs 80 \
+  --max-epochs 1000 \
+  --early-stopping \
+  --early-stopping-patience 15 \
   --out-dir "$OUT2" \
-  --config classification_configs/stent_low_res.yaml \
+  --config configs_classification/stent.yaml \
   -lr 0.005 \
   2>&1 | tee -a "$OUT2/train.log"
 
@@ -89,8 +92,10 @@ echo "" | tee -a "$OUT2/train.log"
 # -----------------------------
 # Stent classification full fine-tuning
 # -----------------------------
-# OUT2=outputs/train/vits16/4_stent_cls_full_fine_tune
-OUT2=outputs/train/vits16/4_stent_cls_full_fine_tune_low_res
+OUT2=outputs/train/${MODEL_NAME}/1_lvd1689m/1_cls/2_stent_full_fine_tune
+# OUT2=outputs/train/${MODEL_NAME}/2_imagenet1k/1_cls/2_stent_full_fine_tune
+# OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/2_stent_full_fine_tune
+
 mkdir -p "$OUT2"
 
 # 실행 시작 시각 로그
@@ -99,15 +104,17 @@ echo "==== START Stent Classification Full Fine-tuning: $(date) ====" | tee -a "
 echo "========================================" | tee -a "$OUT2/train.log"
 
 stdbuf -oL -eL python train_classifier.py \
-  --train-dir input/stent_split_img/train/ \
-  --valid-dir input/stent_split_img/valid/ \
+  --train-dir input/stent_split_img_first_frame/train/ \
+  --valid-dir input/stent_split_img_first_frame/valid/ \
   --weights "$WEIGHTS_FILENAME" \
   --repo-dir dinov3 \
   --model-name "$MODEL_NAME" \
-  --epochs 20 \
+  --max-epochs 1000 \
+  --early-stopping \
+  --early-stopping-patience 15 \
   --fine-tune \
   --out-dir "$OUT2" \
-  --config classification_configs/stent_low_res.yaml \
+  --config configs_classification/stent.yaml \
   2>&1 | tee -a "$OUT2/train.log"
 
 # 실행 시작 시각 로그

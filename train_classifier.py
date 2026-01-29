@@ -29,10 +29,11 @@ torch.backends.cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "-e",
-    "--epochs",
+    "--max-epochs",
     type=int,
+    dest="max_epochs",
     default=10,
-    help="Number of epochs to train our network for",
+    help="Maximum number of epochs to train for",
 )
 parser.add_argument(
     "-lr",
@@ -98,6 +99,33 @@ parser.add_argument(
 )
 parser.add_argument(
     "--config", required=True, help="yaml file with IMAGE_SIZE and CENTER_CROP_SIZE"
+)
+parser.add_argument(
+    "--early-stopping",
+    dest="early_stopping",
+    action="store_true",
+    help="enable early stopping based on validation metric",
+)
+parser.add_argument(
+    "--early-stopping-patience",
+    dest="early_stopping_patience",
+    type=int,
+    default=10,
+    help="number of epochs with no improvement before stopping",
+)
+parser.add_argument(
+    "--early-stopping-min-delta",
+    dest="early_stopping_min_delta",
+    type=float,
+    default=0.0,
+    help="minimum improvement to reset early stopping patience",
+)
+parser.add_argument(
+    "--early-stopping-monitor",
+    dest="early_stopping_monitor",
+    choices=["val_loss", "val_acc"],
+    default="val_loss",
+    help="metric to monitor for early stopping",
 )
 args = parser.parse_args()
 print(args)
@@ -200,11 +228,18 @@ if __name__ == "__main__":
 
     # Learning_parameters.
     lr = args.learning_rate
-    epochs = args.epochs
+    epochs = args.max_epochs
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Computation device: {device}")
     print(f"Learning rate: {lr}")
-    print(f"Epochs to train for: {epochs}\n")
+    print(f"Max epochs to train for: {epochs}\n")
+    if args.early_stopping:
+        print(
+            "Early stopping enabled "
+            f"(monitor={args.early_stopping_monitor}, "
+            f"patience={args.early_stopping_patience}, "
+            f"min_delta={args.early_stopping_min_delta})"
+        )
 
     # Load the model.
     model = Dinov3Classification(
@@ -240,6 +275,12 @@ if __name__ == "__main__":
     train_loss, valid_loss = [], []
     train_acc, valid_acc = [], []
     # Start the training.
+    epochs_trained = 0
+    if args.early_stopping_monitor == "val_loss":
+        best_metric = float("inf")
+    else:
+        best_metric = -float("inf")
+    patience_counter = 0
     for epoch in range(epochs):
         print(f"[INFO]: Epoch {epoch+1} of {epochs}")
         train_epoch_loss, train_epoch_acc = train(
@@ -259,13 +300,33 @@ if __name__ == "__main__":
             f"Validation loss: {valid_epoch_loss:.3f}, validation acc: {valid_epoch_acc:.3f}"
         )
         save_best_model(valid_epoch_loss, epoch, model, out_dir, args.save_name)
+        epochs_trained = epoch + 1
+        if args.early_stopping:
+            if args.early_stopping_monitor == "val_loss":
+                current_metric = valid_epoch_loss
+                improved = current_metric < (best_metric - args.early_stopping_min_delta)
+            else:
+                current_metric = valid_epoch_acc
+                improved = current_metric > (best_metric + args.early_stopping_min_delta)
+            if improved:
+                best_metric = current_metric
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                print(
+                    "EarlyStopping counter: "
+                    f"{patience_counter} of {args.early_stopping_patience}"
+                )
+                if patience_counter >= args.early_stopping_patience:
+                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    break
         print("-" * 50)
         scheduler.step()
         last_lr = scheduler.get_last_lr()
         print(f"LR for next epoch: {last_lr}")
 
     # Save the trained model weights.
-    save_model(epochs, model, optimizer, criterion, out_dir, args.save_name)
+    save_model(epochs_trained, model, optimizer, criterion, out_dir, args.save_name)
     # Save the loss and accuracy plots.
     save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir)
     print("TRAINING COMPLETE")
