@@ -16,6 +16,8 @@ DEFAULT_IMG_ROOT = Path("input/stent_split_img")
 DEFAULT_LABEL_JSON = Path("input/frames_prediction.json")
 DEFAULT_FRAME_INDEX_BASE = 0  # 0 if indices are 0-based, 1 if indices are 1-based
 
+# TODO: filename without frame number
+
 
 # --------------------------------------------------
 # Utility functions
@@ -179,14 +181,18 @@ def load_labels(dcm_index: dict, label_json: Path, frame_index_base: int):
 # --------------------------------------------------
 # Main loop
 # --------------------------------------------------
-def build_output_path(dcm_path: Path, dcm_root: Path, img_root: Path, frame_index: int) -> Path:
+def build_output_path(
+    dcm_path: Path, dcm_root: Path, img_root: Path, frame_index: int
+) -> Path:
     rel_path = dcm_path.relative_to(dcm_root)
     out_dir = img_root / rel_path.parent
     out_name = f"{rel_path.stem}_frame{frame_index:04d}.png"
     return out_dir / out_name
 
 
-def extract_labeled_frames(dcm_root: Path, img_root: Path, label_json: Path, frame_index_base: int):
+def extract_labeled_frames(
+    dcm_root: Path, img_root: Path, label_json: Path, frame_index_base: int
+):
     dcm_index, duplicates, total_dcms = build_dcm_index(dcm_root)
     labels, missing, invalid = load_labels(dcm_index, label_json, frame_index_base)
 
@@ -216,10 +222,27 @@ def extract_labeled_frames(dcm_root: Path, img_root: Path, label_json: Path, fra
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Extract labeled frames from DICOM files.")
-    parser.add_argument("--dcm-root", type=Path, default=DEFAULT_DCM_ROOT, help="Root directory of DICOM files.")
-    parser.add_argument("--img-root", type=Path, default=DEFAULT_IMG_ROOT, help="Root directory to save PNG images.")
-    parser.add_argument("--label-json", type=Path, default=DEFAULT_LABEL_JSON, help="Label JSON/JSONL file path.")
+    parser = argparse.ArgumentParser(
+        description="Extract labeled frames from DICOM files."
+    )
+    parser.add_argument(
+        "--dcm-root",
+        type=Path,
+        default=DEFAULT_DCM_ROOT,
+        help="Root directory of DICOM files.",
+    )
+    parser.add_argument(
+        "--img-root",
+        type=Path,
+        default=DEFAULT_IMG_ROOT,
+        help="Root directory to save PNG images.",
+    )
+    parser.add_argument(
+        "--label-json",
+        type=Path,
+        default=DEFAULT_LABEL_JSON,
+        help="Label JSON/JSONL file path.",
+    )
     parser.add_argument(
         "--frame-index-base",
         type=int,
@@ -235,4 +258,6 @@ def parse_args():
 # --------------------------------------------------
 if __name__ == "__main__":
     args = parse_args()
-    extract_labeled_frames(args.dcm_root, args.img_root, args.label_json, args.frame_index_base)
+    extract_labeled_frames(
+        args.dcm_root, args.img_root, args.label_json, args.frame_index_base
+    )

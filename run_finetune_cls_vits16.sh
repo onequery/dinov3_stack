@@ -61,33 +61,33 @@ MODEL_NAME=dinov3_vits16
 # -----------------------------
 # Stent classification head fine-tuning
 # -----------------------------
-OUT2=outputs/train/${MODEL_NAME}/1_lvd1689m/1_cls/1_stent_head_fine_tune
-# OUT2=outputs/train/${MODEL_NAME}/2_imagenet1k/1_cls/1_stent_head_fine_tune
-# OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/1_stent_head_fine_tune
-mkdir -p "$OUT2"
+# OUT2=outputs/train/${MODEL_NAME}/1_lvd1689m/1_cls/1_stent_head_fine_tune
+# # OUT2=outputs/train/${MODEL_NAME}/2_imagenet1k/1_cls/1_stent_head_fine_tune
+# # OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/1_stent_head_fine_tune
+# mkdir -p "$OUT2"
 
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT2/train.log"
-echo "==== START Stent Classification Head Fine-tuning: $(date) ====" | tee -a "$OUT2/train.log"
-echo "========================================" | tee -a "$OUT2/train.log"
+# # 실행 시작 시각 로그
+# echo "========================================" | tee -a "$OUT2/train.log"
+# echo "==== START Stent Classification Head Fine-tuning: $(date) ====" | tee -a "$OUT2/train.log"
+# echo "========================================" | tee -a "$OUT2/train.log"
 
-stdbuf -oL -eL python train_classifier.py \
-  --train-dir input/stent_split_img_first_frame/train/ \
-  --valid-dir input/stent_split_img_first_frame/valid/ \
-  --weights "$WEIGHTS_FILENAME" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --early-stopping \
-  --early-stopping-patience 15 \
-  --out-dir "$OUT2" \
-  --config configs_classification/stent.yaml \
-  -lr 0.005 \
-  2>&1 | tee -a "$OUT2/train.log"
+# stdbuf -oL -eL python train_classifier.py \
+#   --train-dir input/stent_split_img_first_frame/train/ \
+#   --valid-dir input/stent_split_img_first_frame/valid/ \
+#   --weights "$WEIGHTS_FILENAME" \
+#   --repo-dir dinov3 \
+#   --model-name "$MODEL_NAME" \
+#   --max-epochs 1000 \
+#   --early-stopping \
+#   --early-stopping-patience 15 \
+#   --out-dir "$OUT2" \
+#   --config configs_classification/stent.yaml \
+#   -lr 0.005 \
+#   2>&1 | tee -a "$OUT2/train.log"
 
-# 실행 종료 시각 로그
-echo "==== END Stent Classification Head Fine-tuning: $(date) ====" | tee -a "$OUT2/train.log"
-echo "" | tee -a "$OUT2/train.log"
+# # 실행 종료 시각 로그
+# echo "==== END Stent Classification Head Fine-tuning: $(date) ====" | tee -a "$OUT2/train.log"
+# echo "" | tee -a "$OUT2/train.log"
 
 # -----------------------------
 # Stent classification full fine-tuning
@@ -115,6 +115,7 @@ stdbuf -oL -eL python train_classifier.py \
   --fine-tune \
   --out-dir "$OUT2" \
   --config configs_classification/stent.yaml \
+  -lr 0.0001
   2>&1 | tee -a "$OUT2/train.log"
 
 # 실행 시작 시각 로그
