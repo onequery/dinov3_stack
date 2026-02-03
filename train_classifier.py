@@ -130,7 +130,7 @@ parser.add_argument(
 args = parser.parse_args()
 print(args)
 
-DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
+DINOV3_REPO, _ = get_dinov3_paths()
 
 
 # Training function.
@@ -245,7 +245,8 @@ if __name__ == "__main__":
     model = Dinov3Classification(
         num_classes=len(dataset_classes),
         fine_tune=args.fine_tune,
-        weights=os.path.join(DINOV3_WEIGHTS, args.weights),
+        # weights=os.path.join(DINOV3_WEIGHTS, args.weights),
+        weights=args.weights,
         model_name=args.model_name,
         repo_dir=DINOV3_REPO,
     ).to(device)
@@ -304,10 +305,14 @@ if __name__ == "__main__":
         if args.early_stopping:
             if args.early_stopping_monitor == "val_loss":
                 current_metric = valid_epoch_loss
-                improved = current_metric < (best_metric - args.early_stopping_min_delta)
+                improved = current_metric < (
+                    best_metric - args.early_stopping_min_delta
+                )
             else:
                 current_metric = valid_epoch_acc
-                improved = current_metric > (best_metric + args.early_stopping_min_delta)
+                improved = current_metric > (
+                    best_metric + args.early_stopping_min_delta
+                )
             if improved:
                 best_metric = current_metric
                 patience_counter = 0

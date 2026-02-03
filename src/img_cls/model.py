@@ -2,19 +2,76 @@
 Building a linear classifier on top of DINOv3 backbone.
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
 import torch
 import torch.nn as nn
 
 
-def load_model(weights: str = None, model_name: str = None, repo_dir: str = None):
-    if weights is not None:
-        print("Loading pretrained backbone weights from: ", weights)
-        model = torch.hub.load(repo_dir, model_name, source="local", weights=weights)
-    else:
-        print("No pretrained weights path given. Loading with random weights.")
-        model = torch.hub.load(repo_dir, model_name, source="local")
+def _extract_backbone_state_dict(checkpoint: Any) -> dict[str, Any]:
+    """
+    Normalize various checkpoint formats into a DINOv3 backbone state_dict.
 
-    return model
+    Supported formats:
+    - Plain backbone state_dict (keys like "blocks.0.*", "cls_token", ...)
+    - DINOv3 eval checkpoint (train.py) saved as {"teacher": <ModuleDict state_dict>}
+      where the teacher ModuleDict uses "backbone.*" prefix for the backbone weights.
+    """
+    state_dict = checkpoint
+    if isinstance(state_dict, dict):
+        for key in ("teacher", "state_dict", "model_state_dict", "model"):
+            if key in state_dict and isinstance(state_dict[key], dict):
+                state_dict = state_dict[key]
+                break
+
+    if not isinstance(state_dict, dict):
+        raise TypeError(f"Unsupported checkpoint type: {type(state_dict)}")
+
+    # Remove DistributedDataParallel prefix.
+    if any(k.startswith("module.") for k in state_dict.keys()):
+        state_dict = {
+            (k.removeprefix("module.") if isinstance(k, str) else k): v
+            for k, v in state_dict.items()
+        }
+
+    # DINOv3 SSLMetaArch teacher/student checkpoints typically store backbone under "backbone.*".
+    backbone_items = {k: v for k, v in state_dict.items() if isinstance(k, str) and k.startswith("backbone.")}
+    if backbone_items:
+        return {k.removeprefix("backbone."): v for k, v in backbone_items.items()}
+
+    # Already a backbone state_dict.
+    return state_dict
+
+
+def load_model(weights: str | None = None, model_name: str | None = None, repo_dir: str | None = None):
+    if weights is None:
+        print("No pretrained weights path given. Loading with random weights.")
+        return torch.hub.load(repo_dir, model_name, source="local", pretrained=False)
+
+    weights_path = Path(weights).expanduser()
+    if weights_path.exists():
+        print("Loading pretrained backbone weights from: ", str(weights_path))
+        model = torch.hub.load(repo_dir, model_name, source="local", pretrained=False)
+        checkpoint = torch.load(str(weights_path), map_location="cpu")
+        backbone_state_dict = _extract_backbone_state_dict(checkpoint)
+
+        # Filter to model keys (protects against extra keys like dino_head/ibot_head).
+        model_keys = set(model.state_dict().keys())
+        backbone_state_dict = {k: v for k, v in backbone_state_dict.items() if k in model_keys}
+        msg = model.load_state_dict(backbone_state_dict, strict=False)
+        print(f"Backbone weights loaded (missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)}).")
+        if msg.missing_keys:
+            print("Missing keys (first 20):", msg.missing_keys[:20])
+        if msg.unexpected_keys:
+            print("Unexpected keys (first 20):", msg.unexpected_keys[:20])
+        return model
+
+    # Not a file on disk: assume it's a DINOv3 hub weights identifier or URL.
+    print("Loading DINOv3 hub weights spec: ", weights)
+    return torch.hub.load(repo_dir, model_name, source="local", weights=weights)
 
 
 # def build_model(
