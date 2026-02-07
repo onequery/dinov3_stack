@@ -3,8 +3,8 @@ set -e
 set -o pipefail
 
 # WEIGHTS_FILENAME=dinov3_vits16_pretrain_lvd1689m-08c60483.pth
-# WEIGHTS_FILEPATH=dinov3/output/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
-WEIGHTS_FILEPATH=weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
+WEIGHTS_FILEPATH=dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
+# WEIGHTS_FILEPATH=weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
 MODEL_NAME=dinov3_vits16
 
 # Dataset (ImageFolder-style)
@@ -69,11 +69,11 @@ BATCH_SIZE=32
 # echo "" | tee -a "$OUT1/train.log"
 
 # -----------------------------
-# Stent classification head fine-tuning
+# 1. Stent classification head fine-tuning
 # -----------------------------
-OUT2=outputs/2_finetune/${MODEL_NAME}/1_lvd1689m/1_cls/1_stent_head_fine_tune
+# OUT2=outputs/2_finetune/${MODEL_NAME}/1_lvd1689m/1_cls/1_stent_head_fine_tune
 # OUT2=outputs/2_finetune/${MODEL_NAME}/2_imagenet1k/1_cls/1_stent_head_fine_tune
-# OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/1_stent_head_fine_tune
+OUT2=outputs/2_finetune/1_cls/${MODEL_NAME}/2_imagenet1k/1_stent_head_finetune
 mkdir -p "$OUT2"
 
 # 실행 시작 시각 로그
@@ -101,11 +101,12 @@ echo "==== END Stent Classification Head Fine-tuning: $(date) ====" | tee -a "$O
 echo "" | tee -a "$OUT2/train.log"
 
 # -----------------------------
-# Stent classification full fine-tuning
+# 2. Stent classification full fine-tuning
 # -----------------------------
-OUT2=outputs/2_finetune/${MODEL_NAME}/1_lvd1689m/1_cls/2_stent_full_fine_tune
+# OUT2=outputs/2_finetune/${MODEL_NAME}/1_lvd1689m/1_cls/2_stent_full_fine_tune
 # OUT2=outputs/2_finetune/${MODEL_NAME}/2_imagenet1k/1_cls/2_stent_full_fine_tune
 # OUT2=outputs/train/${MODEL_NAME}/3_cagimgs/1_cls/2_stent_full_fine_tune
+OUT2=outputs/2_finetune/1_cls/${MODEL_NAME}/2_imagenet1k/2_stent_full_finetune
 
 mkdir -p "$OUT2"
 
