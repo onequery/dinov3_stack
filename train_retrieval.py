@@ -8,6 +8,7 @@ import argparse
 import os
 import random
 import re
+from datetime import datetime
 from typing import List
 
 import cv2
@@ -156,6 +157,52 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     return float(np.mean(losses))
 
 
+def save_checkpoint(epoch, model, optimizer, out_dir, name):
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        },
+        os.path.join(out_dir, f"{name}.pth"),
+    )
+    torch.save(
+        {"epoch": epoch, "model_state_dict": model.backbone.state_dict()},
+        os.path.join(out_dir, f"backbone_{name}.pth"),
+    )
+    torch.save(
+        {"epoch": epoch, "model_state_dict": model.projector.state_dict()},
+        os.path.join(out_dir, f"head_{name}.pth"),
+    )
+
+
+def save_best_checkpoint(epoch, model, out_dir, name):
+    torch.save(
+        {"epoch": epoch, "model_state_dict": model.state_dict()},
+        os.path.join(out_dir, f"best_{name}.pth"),
+    )
+    torch.save(
+        {"epoch": epoch, "model_state_dict": model.backbone.state_dict()},
+        os.path.join(out_dir, f"best_backbone_{name}.pth"),
+    )
+    torch.save(
+        {"epoch": epoch, "model_state_dict": model.projector.state_dict()},
+        os.path.join(out_dir, f"best_head_{name}.pth"),
+    )
+
+
+@torch.no_grad()
+def compute_val_loss(model, loader, criterion, device):
+    model.eval()
+    losses = []
+    for imgs, labels in loader:
+        imgs, labels = imgs.to(device), labels.to(device)
+        z = model(imgs)
+        loss = criterion(z, labels)
+        losses.append(loss.item())
+    return float(np.mean(losses)) if losses else 0.0
+
+
 @torch.no_grad()
 def compute_recall_at_k(model, loader, device, ks=(1, 5)):
     model.eval()
@@ -193,7 +240,7 @@ def main():
     parser.add_argument("--train-dir", required=True)
     parser.add_argument("--valid-dir", required=True)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--max-epochs", dest="max_epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--proj-dim", type=int, default=128)
@@ -201,6 +248,40 @@ def main():
     parser.add_argument("--out-dir", default="outputs/train_retrieval")
     parser.add_argument("--model-name", default="dinov3_vits16")
     parser.add_argument("--weights", required=True)
+    parser.add_argument("--save-name", dest="save_name", default="model")
+    parser.add_argument(
+        "--early-stopping",
+        dest="early_stopping",
+        action="store_true",
+        help="enable early stopping based on validation metric",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        dest="early_stopping_patience",
+        type=int,
+        default=10,
+        help="number of epochs with no improvement before stopping",
+    )
+    parser.add_argument(
+        "--early-stopping-min-delta",
+        dest="early_stopping_min_delta",
+        type=float,
+        default=0.0,
+        help="minimum improvement to reset early stopping patience",
+    )
+    parser.add_argument(
+        "--early-stopping-monitor",
+        dest="early_stopping_monitor",
+        choices=["r1", "r5", "val_loss"],
+        default="r1",
+        help="metric to monitor for early stopping",
+    )
+    parser.add_argument(
+        "--repo-dir",
+        dest="repo_dir",
+        help="path to the cloned DINOv3 repository",
+    )
+    parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -225,15 +306,29 @@ def main():
     train_set = RetrievalDataset(args.train_dir, transform)
     valid_set = RetrievalDataset(args.valid_dir, transform)
 
-    train_loader = DataLoader(train_set, args.batch_size, shuffle=True, num_workers=4)
-    valid_loader = DataLoader(valid_set, args.batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(
+        train_set, args.batch_size, shuffle=True, num_workers=args.num_workers
+    )
+    valid_loader = DataLoader(
+        valid_set, args.batch_size, shuffle=False, num_workers=args.num_workers
+    )
 
-    DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
+    if args.repo_dir:
+        dinov3_repo = args.repo_dir
+        dinov3_weights = None
+    else:
+        dinov3_repo, dinov3_weights = get_dinov3_paths()
+
+    weights_path = args.weights
+    if not os.path.exists(weights_path) and dinov3_weights:
+        candidate = os.path.join(dinov3_weights, weights_path)
+        if os.path.exists(candidate):
+            weights_path = candidate
     backbone = torch.hub.load(
-        DINOV3_REPO,
+        dinov3_repo,
         args.model_name,
         source="local",
-        weights=os.path.join(DINOV3_WEIGHTS, args.weights),
+        weights=weights_path,
     ).to(device)
 
     feat_dim = backbone.norm.normalized_shape[0]
@@ -248,20 +343,74 @@ def main():
 
     train_losses, val_losses = [], []
     r1_list, r5_list = [], []
+    if args.early_stopping_monitor == "val_loss":
+        best_metric = float("inf")
+    else:
+        best_metric = -float("inf")
+    patience_counter = 0
+    epochs_trained = 0
 
-    for epoch in range(args.epochs):
-        print(f"\nEpoch [{epoch+1}/{args.epochs}]")
+    for epoch in range(args.max_epochs):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] Epoch [{epoch+1}/{args.max_epochs}]")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
         recalls = compute_recall_at_k(model, valid_loader, device)
+        val_loss = None
+        if args.early_stopping_monitor == "val_loss":
+            val_loss = compute_val_loss(model, valid_loader, criterion, device)
 
         train_losses.append(train_loss)
+        if val_loss is not None:
+            val_losses.append(val_loss)
         r1_list.append(recalls[1])
         r5_list.append(recalls[5])
 
-        print(
+        if args.early_stopping_monitor == "val_loss":
+            current_metric = val_loss
+            improved = current_metric < (best_metric - args.early_stopping_min_delta)
+        elif args.early_stopping_monitor == "r5":
+            current_metric = recalls[5]
+            improved = current_metric > (best_metric + args.early_stopping_min_delta)
+        else:
+            current_metric = recalls[1]
+            improved = current_metric > (best_metric + args.early_stopping_min_delta)
+
+        if improved:
+            best_metric = current_metric
+            print(
+                f"\nSaving best model for epoch: {epoch+1} "
+                f"(monitor={args.early_stopping_monitor}, metric={current_metric:.4f})\n"
+            )
+            save_best_checkpoint(epoch + 1, model, args.out_dir, args.save_name)
+
+        msg = (
             f"Train Loss: {train_loss:.4f} | "
             f"R@1: {recalls[1]:.4f} | R@5: {recalls[5]:.4f}"
         )
+        if val_loss is not None:
+            msg += f" | Val Loss: {val_loss:.4f}"
+        print(msg)
+
+        epochs_trained = epoch + 1
+        if args.early_stopping:
+            if improved:
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                print(
+                    "EarlyStopping counter: "
+                    f"{patience_counter} of {args.early_stopping_patience}"
+                )
+            if patience_counter >= args.early_stopping_patience:
+                print(
+                    "Early stopping triggered "
+                    f"(monitor={args.early_stopping_monitor}, "
+                    f"patience={args.early_stopping_patience}, "
+                    f"min_delta={args.early_stopping_min_delta})"
+                )
+                break
+
+    save_checkpoint(epochs_trained, model, optimizer, args.out_dir, args.save_name)
 
     # -------------------------
     # Plot curves
@@ -281,7 +430,8 @@ def main():
     plt.legend()
     plt.savefig(os.path.join(args.out_dir, "recall_curve.png"))
 
-    print("\nTraining finished.")
+    end_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\nTraining finished at {end_ts}.")
     print(f"[Saved] loss_curve.png, recall_curve.png")
 
 
