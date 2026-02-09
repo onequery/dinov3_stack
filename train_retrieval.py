@@ -406,15 +406,21 @@ class RetrievalDataset(Dataset):
 # Model
 # -------------------------
 class Dinov3Retrieval(nn.Module):
-    def __init__(self, backbone, feat_dim, proj_dim=128, fine_tune=False):
+    def __init__(
+        self,
+        backbone,
+        backbone_embed_dim,
+        retrieval_embedding_dim=128,
+        fine_tune=False,
+    ):
         super().__init__()
         self.backbone = backbone
 
         self.projector = nn.Sequential(
-            nn.Linear(feat_dim, feat_dim),
-            nn.BatchNorm1d(feat_dim),
+            nn.Linear(backbone_embed_dim, backbone_embed_dim),
+            nn.BatchNorm1d(backbone_embed_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, proj_dim),
+            nn.Linear(backbone_embed_dim, retrieval_embedding_dim),
         )
 
         if not fine_tune:
@@ -650,8 +656,13 @@ def main():
         device,
     )
 
-    feat_dim = backbone.norm.normalized_shape[0]
-    model = Dinov3Retrieval(backbone, feat_dim, args.proj_dim, args.fine_tune).to(
+    backbone_embed_dim = backbone.norm.normalized_shape[0]
+    model = Dinov3Retrieval(
+        backbone,
+        backbone_embed_dim=backbone_embed_dim,
+        retrieval_embedding_dim=args.proj_dim,
+        fine_tune=args.fine_tune,
+    ).to(
         device
     )
 
@@ -663,7 +674,10 @@ def main():
     start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(
         f"[{start_ts}] Setup | model={args.model_name} | fine_tune={args.fine_tune} "
-        f"| embed_dim={feat_dim} | proj_dim={args.proj_dim} | batch_size={args.batch_size} "
+        f"| backbone_embed_dim={backbone_embed_dim} "
+        f"| retrieval_embedding_dim={args.proj_dim} "
+        f"| proj_dim={args.proj_dim} "
+        f"| batch_size={args.batch_size} "
         f"| num_workers={args.num_workers} | lr={args.lr} "
         f"| max_epochs={args.max_epochs} | early_stopping={args.early_stopping} "
         f"| weights={weights_path} "

@@ -56,14 +56,19 @@ def l2_normalize(x: torch.Tensor) -> torch.Tensor:
 
 
 class Dinov3Retrieval(nn.Module):
-    def __init__(self, backbone: nn.Module, feat_dim: int, proj_dim: int = 128):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        backbone_embed_dim: int,
+        retrieval_embedding_dim: int = 128,
+    ):
         super().__init__()
         self.backbone = backbone
         self.projector = nn.Sequential(
-            nn.Linear(feat_dim, feat_dim),
-            nn.BatchNorm1d(feat_dim),
+            nn.Linear(backbone_embed_dim, backbone_embed_dim),
+            nn.BatchNorm1d(backbone_embed_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(feat_dim, proj_dim),
+            nn.Linear(backbone_embed_dim, retrieval_embedding_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -86,10 +91,11 @@ def load_retrieval_model(
     model_name: str,
     weights_path: Optional[str],
     proj_dim: int,
-) -> Tuple[nn.Module, str]:
+) -> Tuple[nn.Module, str, int]:
     if weights_path is None:
         backbone = torch.hub.load(repo_dir, model_name, source="local")
-        return BackboneRetrieval(backbone), "backbone_only_default"
+        backbone_embed_dim = backbone.norm.normalized_shape[0]
+        return BackboneRetrieval(backbone), "backbone_only_default", backbone_embed_dim
 
     if not os.path.isfile(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
@@ -113,10 +119,18 @@ def load_retrieval_model(
             weights_path=weights_path,
             device="cpu",
         )
-        feat_dim = backbone.norm.normalized_shape[0]
-        model = Dinov3Retrieval(backbone, feat_dim=feat_dim, proj_dim=proj_dim)
+        backbone_embed_dim = backbone.norm.normalized_shape[0]
+        model = Dinov3Retrieval(
+            backbone,
+            backbone_embed_dim=backbone_embed_dim,
+            retrieval_embedding_dim=proj_dim,
+        )
         model.load_state_dict(state_dict, strict=True)
-        return model, f"retrieval_with_projector:{load_report['builder']}"
+        return (
+            model,
+            f"retrieval_with_projector:{load_report['builder']}",
+            backbone_embed_dim,
+        )
 
     backbone, load_report = load_backbone_from_local_checkpoint(
         repo_dir=repo_dir,
@@ -124,7 +138,12 @@ def load_retrieval_model(
         weights_path=weights_path,
         device="cpu",
     )
-    return BackboneRetrieval(backbone), f"backbone_only:{load_report['builder']}"
+    backbone_embed_dim = backbone.norm.normalized_shape[0]
+    return (
+        BackboneRetrieval(backbone),
+        f"backbone_only:{load_report['builder']}",
+        backbone_embed_dim,
+    )
 
 
 def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compose:
@@ -180,7 +199,7 @@ def main():
     }
 
     # Load retrieval model
-    model, embedding_source = load_retrieval_model(
+    model, embedding_source, backbone_embed_dim = load_retrieval_model(
         args.repo_dir, args.model_name, args.weights, args.proj_dim
     )
     model = model.to(device)
@@ -202,8 +221,8 @@ def main():
             emb = model(x).cpu()
             feats_list.append(emb)
 
-    features = torch.cat(feats_list, dim=0)
-    n, d = features.shape
+    retrieval_features = torch.cat(feats_list, dim=0)
+    n, retrieval_embedding_dim = retrieval_features.shape
 
     # Retrieval evaluation
     K_LIST = sorted(set(int(k) for k in args.k))
@@ -222,7 +241,7 @@ def main():
         pos_idx = patient_to_indices[pid]
         pos_idx = pos_idx[pos_idx != i]
 
-        sims = torch.mv(features, features[i])
+        sims = torch.mv(retrieval_features, retrieval_features[i])
         sims[i] = -1e9
         sorted_idx = torch.argsort(sims, descending=True)
 
@@ -294,10 +313,11 @@ def main():
         f.write(f"Repo: {args.repo_dir}\n")
         f.write(f"Weights: {args.weights if args.weights else '(torch.hub default)'}\n")
         f.write(f"Embedding source: {embedding_source}\n")
+        f.write(f"Backbone embed dim: {backbone_embed_dim}\n")
+        f.write(f"Retrieval embedding dim: {retrieval_embedding_dim}\n")
         f.write(f"Projection dim arg: {args.proj_dim}\n")
         f.write(f"Dataset: {args.input}\n")
         f.write(f"N images: {n}\n")
-        f.write(f"Embedding dim: {d}\n")
         f.write(f"Unique patients: {len(np.unique(patient_ids))}\n")
         f.write(f"Queries with no positives: {num_no_pos}\n\n")
         for k, v in results.items():
