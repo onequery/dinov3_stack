@@ -25,10 +25,46 @@ from src.img_seg.model import Dinov3Segmentation
 from src.utils.common import get_dinov3_paths
 
 
-def collect_paths(root_dir: str) -> List[str]:
-    paths = glob.glob(os.path.join(root_dir, "*"))
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def collect_paths(root_dir: str, extensions: set[str]) -> List[str]:
+    paths = glob.glob(os.path.join(root_dir, "**", "*"), recursive=True)
+    paths = [
+        path
+        for path in paths
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in extensions
+    ]
     paths.sort()
     return paths
+
+
+def pair_image_mask_paths(
+    image_paths: List[str],
+    mask_paths: List[str],
+    image_root: str,
+    mask_root: str,
+) -> Tuple[List[str], List[str]]:
+    image_map = {os.path.relpath(path, image_root): path for path in image_paths}
+    mask_map = {os.path.relpath(path, mask_root): path for path in mask_paths}
+
+    shared_paths = sorted(set(image_map.keys()) & set(mask_map.keys()))
+    missing_images = sorted(set(mask_map.keys()) - set(image_map.keys()))
+    missing_masks = sorted(set(image_map.keys()) - set(mask_map.keys()))
+
+    if missing_images or missing_masks:
+        print(
+            "[WARN] eval: paired using intersection only "
+            f"(missing_images={len(missing_images)}, missing_masks={len(missing_masks)})."
+        )
+
+    if not shared_paths:
+        raise ValueError(
+            "No paired image/mask files found. "
+            f"images_root={image_root}, masks_root={mask_root}"
+        )
+
+    return [image_map[path] for path in shared_paths], [mask_map[path] for path in shared_paths]
 
 
 def build_dataloader(
@@ -40,17 +76,17 @@ def build_dataloader(
     batch_size: int,
     num_workers: int,
 ) -> torch.utils.data.DataLoader:
-    image_paths = collect_paths(image_dir)
-    mask_paths = collect_paths(mask_dir)
+    image_paths = collect_paths(image_dir, IMAGE_EXTENSIONS)
+    mask_paths = collect_paths(mask_dir, IMAGE_EXTENSIONS)
+
+    image_paths, mask_paths = pair_image_mask_paths(
+        image_paths, mask_paths, image_dir, mask_dir
+    )
 
     if len(image_paths) == 0:
         raise ValueError(f"No images found in: {image_dir}")
     if len(mask_paths) == 0:
         raise ValueError(f"No masks found in: {mask_dir}")
-    if len(image_paths) != len(mask_paths):
-        raise ValueError(
-            f"Image/Mask count mismatch: {len(image_paths)} vs {len(mask_paths)}"
-        )
 
     tfms = valid_transforms(img_size)
     dataset = SegmentationDataset(
@@ -66,6 +102,8 @@ def build_dataloader(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
         drop_last=False,
         collate_fn=collate_fn,
     )
@@ -77,6 +115,41 @@ def load_checkpoint(path: str, device: torch.device) -> dict:
     if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         return ckpt["model_state_dict"]
     return ckpt
+
+
+def normalize_state_dict_keys(state_dict: dict) -> dict:
+    if not isinstance(state_dict, dict):
+        raise ValueError("Checkpoint state_dict must be a dictionary.")
+    if any(key.startswith("module.") for key in state_dict.keys()):
+        return {
+            key[len("module.") :]: value
+            for key, value in state_dict.items()
+            if key.startswith("module.")
+        }
+    return state_dict
+
+
+def resolve_repo_path(repo_dir_arg: str | None, env_repo_dir: str | None) -> str:
+    if repo_dir_arg:
+        repo_path = os.path.abspath(os.path.expanduser(repo_dir_arg))
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"DINOv3 repository not found at: {repo_path}")
+        return repo_path
+
+    if not env_repo_dir:
+        raise ValueError(
+            "DINOv3 repository path is missing. "
+            "Set DINOV3_REPO in .env or pass --repo-dir."
+        )
+
+    return env_repo_dir
+
+
+def resolve_checkpoint_path(weights_arg: str) -> str:
+    candidate = os.path.abspath(os.path.expanduser(weights_arg))
+    if not os.path.isfile(candidate):
+        raise FileNotFoundError(f"Checkpoint not found at: {candidate}")
+    return candidate
 
 
 def evaluate(
@@ -159,11 +232,6 @@ def main():
     )
     parser.add_argument("--device", default=None)
     parser.add_argument("--repo-dir", default=None)
-    parser.add_argument(
-        "--backbone-weights",
-        default=None,
-        help="optional backbone weights (relative to DINOv3_WEIGHTS if not absolute)",
-    )
     args = parser.parse_args()
 
     if len(args.imgsz) != 2:
@@ -181,16 +249,12 @@ def main():
     all_classes = config["ALL_CLASSES"]
     label_colors_list = config["LABEL_COLORS_LIST"]
 
-    # Resolve DINOv3 repo / weights root
-    dinov3_repo, dinov3_weights = get_dinov3_paths()
-    repo_dir = args.repo_dir if args.repo_dir is not None else dinov3_repo
-
-    backbone_weights = None
-    if args.backbone_weights:
-        if os.path.isabs(args.backbone_weights):
-            backbone_weights = args.backbone_weights
-        else:
-            backbone_weights = os.path.join(dinov3_weights, args.backbone_weights)
+    dinov3_repo, _ = get_dinov3_paths(
+        require_repo=not bool(args.repo_dir),
+        require_weights=False,
+    )
+    repo_dir = resolve_repo_path(args.repo_dir, dinov3_repo)
+    checkpoint_path = resolve_checkpoint_path(args.weights)
 
     # Build dataloader
     dataloader = build_dataloader(
@@ -207,19 +271,29 @@ def main():
     model = Dinov3Segmentation(
         fine_tune=False,
         num_classes=len(all_classes),
-        weights=backbone_weights,
+        weights=checkpoint_path,
         model_name=args.model_name,
         repo_dir=repo_dir,
         feature_extractor=args.feature_extractor,
     ).to(device)
 
-    state_dict = load_checkpoint(args.weights, device)
-    try:
-        model.load_state_dict(state_dict)
-    except RuntimeError as e:
+    state_dict = normalize_state_dict_keys(load_checkpoint(checkpoint_path, device))
+
+    if not any(key.startswith("backbone_model.") for key in state_dict.keys()):
         raise RuntimeError(
-            "Failed to load weights. Pass a full model checkpoint "
-            "(e.g., best_model_iou.pth), not decode_head-only weights."
+            "The checkpoint does not include full segmentation model weights "
+            "(missing `backbone_model.*` keys). "
+            "Please pass a full checkpoint such as `best_model_iou.pth`."
+        )
+
+    try:
+        model.load_state_dict(state_dict, strict=True)
+    except RuntimeError as e:
+        detail = str(e).splitlines()[0]
+        raise RuntimeError(
+            "Failed to load segmentation checkpoint. "
+            f"checkpoint={checkpoint_path}. "
+            f"details={detail}"
         ) from e
 
     # Evaluate

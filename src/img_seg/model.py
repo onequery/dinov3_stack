@@ -53,8 +53,11 @@ def _extract_backbone_state_dict(
     state_dict: Dict[str, torch.Tensor],
 ) -> Tuple[Dict[str, torch.Tensor], str]:
     prefix_candidates = (
+        "module.backbone_model.",
+        "backbone_model.",
         "module.backbone.",
         "backbone.",
+        "model.backbone_model.",
         "teacher.backbone.",
         "student.backbone.",
         "model.backbone.",
