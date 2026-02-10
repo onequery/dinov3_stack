@@ -1,4 +1,5 @@
 import glob
+import os
 import albumentations as A
 import cv2
 import torch
@@ -9,16 +10,68 @@ from torch.utils.data import Dataset, DataLoader
 
 IMG_MEAN = (0.485, 0.456, 0.406)
 IMG_STD = (0.229, 0.224, 0.225)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+
+
+def _collect_files(root_dir, extensions):
+    files = glob.glob(os.path.join(root_dir, "**", "*"), recursive=True)
+    return sorted(
+        [
+            file_path
+            for file_path in files
+            if os.path.isfile(file_path)
+            and os.path.splitext(file_path)[1].lower() in extensions
+        ]
+    )
+
+
+def _pair_image_and_mask_paths(image_paths, mask_paths, image_root, mask_root, split_name):
+    image_map = {
+        os.path.relpath(image_path, image_root): image_path for image_path in image_paths
+    }
+    mask_map = {os.path.relpath(mask_path, mask_root): mask_path for mask_path in mask_paths}
+
+    shared_paths = sorted(set(image_map.keys()) & set(mask_map.keys()))
+    missing_images = sorted(set(mask_map.keys()) - set(image_map.keys()))
+    missing_masks = sorted(set(image_map.keys()) - set(mask_map.keys()))
+
+    if missing_images or missing_masks:
+        print(
+            f"[WARN] {split_name}: paired using intersection only "
+            f"(missing_images={len(missing_images)}, missing_masks={len(missing_masks)})."
+        )
+
+    if not shared_paths:
+        raise ValueError(
+            f"No paired image/mask files found for {split_name}. "
+            f"images_root={image_root}, masks_root={mask_root}"
+        )
+
+    paired_images = [image_map[path] for path in shared_paths]
+    paired_masks = [mask_map[path] for path in shared_paths]
+    return paired_images, paired_masks
 
 def get_images(train_images, train_masks, valid_images, valid_masks):
-    train_images = glob.glob(f"{train_images}/*")
-    train_images.sort()
-    train_masks = glob.glob(f"{train_masks}/*")
-    train_masks.sort()
-    valid_images = glob.glob(f"{valid_images}/*")
-    valid_images.sort()
-    valid_masks = glob.glob(f"{valid_masks}/*")
-    valid_masks.sort()
+    train_image_paths = _collect_files(train_images, IMAGE_EXTENSIONS)
+    train_mask_paths = _collect_files(train_masks, MASK_EXTENSIONS)
+    valid_image_paths = _collect_files(valid_images, IMAGE_EXTENSIONS)
+    valid_mask_paths = _collect_files(valid_masks, MASK_EXTENSIONS)
+
+    train_images, train_masks = _pair_image_and_mask_paths(
+        train_image_paths,
+        train_mask_paths,
+        train_images,
+        train_masks,
+        "train",
+    )
+    valid_images, valid_masks = _pair_image_and_mask_paths(
+        valid_image_paths,
+        valid_mask_paths,
+        valid_images,
+        valid_masks,
+        "valid",
+    )
 
     return train_images, train_masks, valid_images, valid_masks
 

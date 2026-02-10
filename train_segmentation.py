@@ -26,7 +26,12 @@ torch.backends.cudnn.benchmark = True
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--epochs", default=10, help="number of epochs to train for", type=int
+    "--epochs",
+    "--max-epochs",
+    dest="epochs",
+    default=10,
+    help="number of epochs to train for",
+    type=int,
 )
 parser.add_argument(
     "--lr", default=0.0001, help="learning rate for optimizer", type=float
@@ -89,9 +94,57 @@ parser.add_argument(
 args = parser.parse_args()
 print(args)
 
-DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths()
+
+def resolve_repo_path(repo_dir_arg, env_repo_dir):
+    if repo_dir_arg:
+        repo_path = os.path.abspath(os.path.expanduser(repo_dir_arg))
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"DINOv3 repository not found at: {repo_path}")
+        return repo_path
+
+    if not env_repo_dir:
+        raise ValueError(
+            "DINOv3 repository path is missing. "
+            "Set DINOV3_REPO in .env or pass --repo-dir."
+        )
+
+    return env_repo_dir
+
+
+def resolve_weights_path(weights_arg, env_weights_dir):
+    candidate_path = os.path.expanduser(weights_arg)
+    if os.path.isabs(candidate_path):
+        if os.path.exists(candidate_path):
+            return candidate_path
+        raise FileNotFoundError(f"Pretrained weights not found at: {candidate_path}")
+
+    local_candidate = os.path.abspath(candidate_path)
+    if os.path.exists(local_candidate):
+        return local_candidate
+
+    if env_weights_dir:
+        env_candidate = os.path.join(env_weights_dir, candidate_path)
+        if os.path.exists(env_candidate):
+            return env_candidate
+
+    raise FileNotFoundError(
+        "Pretrained weights not found. "
+        f"Checked local path '{local_candidate}'"
+        + (
+            f" and '{os.path.join(env_weights_dir, candidate_path)}'."
+            if env_weights_dir
+            else "."
+        )
+    )
 
 if __name__ == "__main__":
+    DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths(
+        require_repo=not bool(args.repo_dir),
+        require_weights=False,
+    )
+    repo_dir = resolve_repo_path(args.repo_dir, DINOV3_REPO)
+    weights_path = resolve_weights_path(args.weights, DINOV3_WEIGHTS)
+
     # Create a directory with the model name for outputs.
     # out_dir = os.path.join('outputs', args.out_dir)
     out_dir = args.out_dir
@@ -111,9 +164,9 @@ if __name__ == "__main__":
     model = Dinov3Segmentation(
         fine_tune=args.fine_tune,
         num_classes=len(ALL_CLASSES),
-        weights=os.path.join(DINOV3_WEIGHTS, args.weights),
+        weights=weights_path,
         model_name=args.model_name,
-        repo_dir=DINOV3_REPO,
+        repo_dir=repo_dir,
         feature_extractor=args.feature_extractor,
     )
     _ = model.to(device)
