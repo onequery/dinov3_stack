@@ -56,41 +56,41 @@ run_eval_experiment() {
 # ===================================================================
 # 1. Segmentation evaluation with MPXA-Seg test set - Full fine-tuning
 # ===================================================================
-run_eval_experiment \
-  "Full" \
-  "LVD-1689M" \
-  "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune"
-
-run_eval_experiment \
-  "Full" \
-  "ImageNet-1K" \
-  "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune"
+# run_eval_experiment \
+#   "Full" \
+#   "LVD-1689M" \
+#   "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune" \
+#   "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune"
 
 # run_eval_experiment \
 #   "Full" \
-#   "CAG-Contrast-FM-3M" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune"
+#   "ImageNet-1K" \
+#   "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune" \
+#   "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune"
+
+run_eval_experiment \
+  "Full" \
+  "CAG-Contrast-FM-3M" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune" \
+  "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune"
 
 # ===================================================================
 # 2. Segmentation evaluation with MPXA-Seg test set - Head fine-tuning
 # ===================================================================
-# run_eval_experiment \
-#   "Head" \
-#   "LVD-1689M" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune"
+run_eval_experiment \
+  "Head" \
+  "LVD-1689M" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune" \
+  "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune"
 
-# run_eval_experiment \
-#   "Head" \
-#   "ImageNet-1K" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune"
+run_eval_experiment \
+  "Head" \
+  "ImageNet-1K" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune" \
+  "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune"
 
-# run_eval_experiment \
-#   "Head" \
-#   "CAG-Contrast-FM-3M" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune"
+run_eval_experiment \
+  "Head" \
+  "CAG-Contrast-FM-3M" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune" \
+  "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune"
