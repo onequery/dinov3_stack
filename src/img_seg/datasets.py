@@ -199,22 +199,27 @@ def get_dataset(
     )
     return train_dataset, valid_dataset
 
-def get_data_loaders(train_dataset, valid_dataset, batch_size):
+def get_data_loaders(train_dataset, valid_dataset, batch_size, num_workers=8):
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "drop_last": False,
+        "num_workers": num_workers,
+        "pin_memory": True,
+        "collate_fn": collate_fn,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 4
+
     train_data_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        drop_last=False, 
-        num_workers=8,
+        train_dataset,
         shuffle=True,
-        collate_fn=collate_fn
+        **loader_kwargs
     )
     valid_data_loader = DataLoader(
-        valid_dataset, 
-        batch_size=batch_size, 
-        drop_last=False, 
-        num_workers=8,
+        valid_dataset,
         shuffle=False,
-        collate_fn=collate_fn
+        **loader_kwargs
     )
 
     return train_data_loader, valid_data_loader

@@ -26,11 +26,10 @@ torch.backends.cudnn.benchmark = True
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--epochs",
-    "--max-epochs",
-    dest="epochs",
+    "--max-epoch",
+    dest="max_epoch",
     default=10,
-    help="number of epochs to train for",
+    help="maximum number of epochs to train for",
     type=int,
 )
 parser.add_argument(
@@ -46,6 +45,40 @@ parser.add_argument(
 )
 parser.add_argument(
     "--scheduler-epochs", dest="scheduler_epochs", default=[30], nargs="+", type=int
+)
+parser.add_argument(
+    "--num-workers",
+    dest="num_workers",
+    default=8,
+    type=int,
+    help="number of worker processes for data loading",
+)
+parser.add_argument(
+    "--early-stopping",
+    dest="early_stopping",
+    action="store_true",
+    help="enable early stopping based on validation metric",
+)
+parser.add_argument(
+    "--early-stopping-patience",
+    dest="early_stopping_patience",
+    default=10,
+    type=int,
+    help="number of epochs with no improvement before stopping",
+)
+parser.add_argument(
+    "--early-stopping-min-delta",
+    dest="early_stopping_min_delta",
+    default=0.0,
+    type=float,
+    help="minimum metric improvement to reset early stopping patience",
+)
+parser.add_argument(
+    "--early-stopping-monitor",
+    dest="early_stopping_monitor",
+    choices=["valid_miou", "valid_loss", "valid_pixacc"],
+    default="valid_miou",
+    help="metric to monitor for early stopping",
 )
 parser.add_argument(
     "--train-images", dest="train_images", required=True, help="path to training images"
@@ -199,7 +232,7 @@ if __name__ == "__main__":
     )
 
     train_dataloader, valid_dataloader = get_data_loaders(
-        train_dataset, valid_dataset, args.batch
+        train_dataset, valid_dataset, args.batch, args.num_workers
     )
 
     # Initialize `SaveBestModel` class.
@@ -210,8 +243,14 @@ if __name__ == "__main__":
 
     train_loss, train_pix_acc, train_miou = [], [], []
     valid_loss, valid_pix_acc, valid_miou = [], [], []
+    if args.early_stopping_monitor == "valid_loss":
+        best_metric = float("inf")
+    else:
+        best_metric = -float("inf")
+    patience_counter = 0
+    epochs_trained = 0
 
-    for epoch in range(args.epochs):
+    for epoch in range(args.max_epoch):
         print(f"EPOCH: {epoch + 1}")
         train_epoch_loss, train_epoch_pixacc, train_epoch_miou = train(
             model, train_dataloader, device, optimizer, criterion, ALL_CLASSES
@@ -248,10 +287,43 @@ if __name__ == "__main__":
             f"Valid Epoch mIOU: {valid_epoch_miou:4f}",
         )
 
+        if args.early_stopping_monitor == "valid_loss":
+            current_metric = valid_epoch_loss
+            improved = current_metric < (best_metric - args.early_stopping_min_delta)
+        elif args.early_stopping_monitor == "valid_pixacc":
+            current_metric = valid_epoch_pixacc
+            improved = current_metric > (best_metric + args.early_stopping_min_delta)
+        else:
+            current_metric = valid_epoch_miou
+            improved = current_metric > (best_metric + args.early_stopping_min_delta)
+
+        if improved:
+            best_metric = current_metric
+
         if args.scheduler:
             scheduler.step()
         last_lr = scheduler.get_last_lr()
         print(f"LR for next epoch: {last_lr}")
+
+        epochs_trained = epoch + 1
+        if args.early_stopping:
+            if improved:
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                print(
+                    "EarlyStopping counter: "
+                    f"{patience_counter} of {args.early_stopping_patience}"
+                )
+
+            if patience_counter >= args.early_stopping_patience:
+                print(
+                    "Early stopping triggered "
+                    f"(monitor={args.early_stopping_monitor}, "
+                    f"patience={args.early_stopping_patience}, "
+                    f"min_delta={args.early_stopping_min_delta})"
+                )
+                break
 
         print("-" * 50)
 
@@ -266,5 +338,5 @@ if __name__ == "__main__":
         out_dir,
     )
     # Save final model.
-    save_model(args.epochs, model, optimizer, criterion, out_dir, name="final_model")
+    save_model(epochs_trained, model, optimizer, criterion, out_dir, name="final_model")
     print("TRAINING COMPLETE")
