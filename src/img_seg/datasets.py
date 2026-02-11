@@ -85,8 +85,7 @@ def train_transforms(img_size):
     train_image_transform = A.Compose([
         A.Resize(
             img_size[1], 
-            img_size[0], 
-            always_apply=True,
+            img_size[0],
             # interpolation=cv2.INTER_CUBIC
         ),
         A.HorizontalFlip(p=0.5),
@@ -105,8 +104,7 @@ def valid_transforms(img_size):
     """
     valid_image_transform = A.Compose([
         A.Resize(
-            img_size[1], img_size[0], 
-            always_apply=True, 
+            img_size[1], img_size[0],
             # interpolation=cv2.INTER_CUBIC
         ),
         A.Normalize(mean=IMG_MEAN, std=IMG_STD, max_pixel_value=255.)

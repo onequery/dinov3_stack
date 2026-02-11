@@ -5,6 +5,7 @@ import torch.nn as nn
 import yaml
 import numpy as np
 import random
+from datetime import datetime
 
 from src.img_seg.datasets import get_images, get_dataset, get_data_loaders
 from src.img_seg.model import Dinov3Segmentation
@@ -24,6 +25,11 @@ torch.cuda.manual_seed_all(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+
+def log_with_time(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--max-epoch",
@@ -34,6 +40,13 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr", default=0.0001, help="learning rate for optimizer", type=float
+)
+parser.add_argument(
+    "--backbone-lr",
+    dest="backbone_lr",
+    default=None,
+    help="learning rate for backbone during full fine-tuning",
+    type=float,
 )
 parser.add_argument("--batch", default=4, help="batch size for data loader", type=int)
 parser.add_argument(
@@ -125,7 +138,7 @@ parser.add_argument(
     help="whether to use layer or multiple layers as features",
 )
 args = parser.parse_args()
-print(args)
+log_with_time(f"Args: {args}")
 
 
 def resolve_repo_path(repo_dir_arg, env_repo_dir):
@@ -210,7 +223,24 @@ if __name__ == "__main__":
         row_settings=["var_names"],
     )
 
-    optimizer = torch.optim.AdamW(model.parameters(), weight_decay=0.0001, lr=args.lr)
+    if args.fine_tune and args.backbone_lr is not None:
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": model.backbone_model.parameters(), "lr": args.backbone_lr},
+                {"params": model.decode_head.parameters(), "lr": args.lr},
+            ],
+            weight_decay=0.0001,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            weight_decay=0.0001,
+            lr=args.lr,
+        )
+    if args.fine_tune and args.backbone_lr is not None:
+        log_with_time(f"Optimizer LR | head={args.lr} | backbone={args.backbone_lr}")
+    else:
+        log_with_time(f"Optimizer LR | all_trainable={args.lr}")
     criterion = nn.CrossEntropyLoss()
 
     train_images, train_masks, valid_images, valid_masks = get_images(
@@ -251,7 +281,7 @@ if __name__ == "__main__":
     epochs_trained = 0
 
     for epoch in range(args.max_epoch):
-        print(f"EPOCH: {epoch + 1}")
+        log_with_time(f"EPOCH: {epoch + 1}")
         train_epoch_loss, train_epoch_pixacc, train_epoch_miou = train(
             model, train_dataloader, device, optimizer, criterion, ALL_CLASSES
         )
@@ -276,15 +306,15 @@ if __name__ == "__main__":
         save_best_model(valid_epoch_loss, epoch, model, out_dir, name="model_loss")
         save_best_iou(valid_epoch_miou, epoch, model, out_dir, name="model_iou")
 
-        print(
-            f"Train Epoch Loss: {train_epoch_loss:.4f},",
-            f"Train Epoch PixAcc: {train_epoch_pixacc:.4f},",
-            f"Train Epoch mIOU: {train_epoch_miou:4f}",
+        log_with_time(
+            f"Train Epoch Loss: {train_epoch_loss:.4f}, "
+            f"Train Epoch PixAcc: {train_epoch_pixacc:.4f}, "
+            f"Train Epoch mIOU: {train_epoch_miou:4f}"
         )
-        print(
-            f"Valid Epoch Loss: {valid_epoch_loss:.4f},",
-            f"Valid Epoch PixAcc: {valid_epoch_pixacc:.4f}",
-            f"Valid Epoch mIOU: {valid_epoch_miou:4f}",
+        log_with_time(
+            f"Valid Epoch Loss: {valid_epoch_loss:.4f}, "
+            f"Valid Epoch PixAcc: {valid_epoch_pixacc:.4f}, "
+            f"Valid Epoch mIOU: {valid_epoch_miou:4f}"
         )
 
         if args.early_stopping_monitor == "valid_loss":
@@ -303,7 +333,7 @@ if __name__ == "__main__":
         if args.scheduler:
             scheduler.step()
         last_lr = scheduler.get_last_lr()
-        print(f"LR for next epoch: {last_lr}")
+        log_with_time(f"LR for next epoch: {last_lr}")
 
         epochs_trained = epoch + 1
         if args.early_stopping:
@@ -311,13 +341,13 @@ if __name__ == "__main__":
                 patience_counter = 0
             else:
                 patience_counter += 1
-                print(
+                log_with_time(
                     "EarlyStopping counter: "
                     f"{patience_counter} of {args.early_stopping_patience}"
                 )
 
             if patience_counter >= args.early_stopping_patience:
-                print(
+                log_with_time(
                     "Early stopping triggered "
                     f"(monitor={args.early_stopping_monitor}, "
                     f"patience={args.early_stopping_patience}, "
@@ -325,7 +355,7 @@ if __name__ == "__main__":
                 )
                 break
 
-        print("-" * 50)
+        log_with_time("-" * 50)
 
     # Save the loss and accuracy plots.
     save_plots(
@@ -339,4 +369,4 @@ if __name__ == "__main__":
     )
     # Save final model.
     save_model(epochs_trained, model, optimizer, criterion, out_dir, name="final_model")
-    print("TRAINING COMPLETE")
+    log_with_time("TRAINING COMPLETE")

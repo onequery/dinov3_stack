@@ -355,6 +355,14 @@ def load_backbone_from_local_checkpoint(
 
     strict_load = set(model_state.keys()).issubset(set(loadable_state_dict.keys()))
     incompatible = backbone.load_state_dict(loadable_state_dict, strict=strict_load)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise ValueError(
+            "Backbone load resulted in incompatible keys. "
+            f"missing={len(incompatible.missing_keys)}, "
+            f"unexpected={len(incompatible.unexpected_keys)}, "
+            f"sample_missing={incompatible.missing_keys[:10]}, "
+            f"sample_unexpected={incompatible.unexpected_keys[:10]}"
+        )
     load_report = {
         "state_source": state_source,
         "config_path": config_path,
@@ -568,6 +576,12 @@ def main():
     parser.add_argument("--max-epochs", dest="max_epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--backbone-lr",
+        type=float,
+        default=None,
+        help="learning rate for backbone parameters during full fine-tuning",
+    )
     parser.add_argument("--proj-dim", type=int, default=128)
     parser.add_argument("--fine-tune", action="store_true")
     parser.add_argument("--out-dir", default="outputs/train_retrieval")
@@ -667,9 +681,17 @@ def main():
     )
 
     criterion = SupConLoss()
-    optimizer = optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
-    )
+    if args.fine_tune and args.backbone_lr is not None:
+        optimizer = optim.AdamW(
+            [
+                {"params": model.backbone.parameters(), "lr": args.backbone_lr},
+                {"params": model.projector.parameters(), "lr": args.lr},
+            ]
+        )
+    else:
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
+        )
 
     start_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(
@@ -679,6 +701,7 @@ def main():
         f"| proj_dim={args.proj_dim} "
         f"| batch_size={args.batch_size} "
         f"| num_workers={args.num_workers} | lr={args.lr} "
+        f"| backbone_lr={args.backbone_lr if args.backbone_lr is not None else 'default'} "
         f"| max_epochs={args.max_epochs} | early_stopping={args.early_stopping} "
         f"| weights={weights_path} "
         f"| monitor={args.early_stopping_monitor} "

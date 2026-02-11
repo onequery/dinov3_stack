@@ -1,238 +1,130 @@
 #!/bin/bash
-
 set -e
 set -o pipefail
 
-# =====================================================
-# Setup
-# =====================================================
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 MODEL_NAME=dinov3_vits16
-NUM_WORKERS=32
-BATCH_SIZE=128  # Need to fix through out experiments
-PROJ_DIM=128
 TRAIN_DIR=input/Stent-Contrast/train/
 VALID_DIR=input/Stent-Contrast/valid/
-EARLY_STOPPING_PATIENCE=15
+RET_CONFIG=configs_retrieval/patients.yaml
+
+BATCH_SIZE=128
+MAX_EPOCHS=1000
+NUM_WORKERS=32
+PROJ_DIM=128
+
+EARLY_STOPPING_PATIENCE=30
 EARLY_STOPPING_MIN_DELTA=0.0
 EARLY_STOPPING_MONITOR=r1
 
-# =====================================================
-# 1. Patient retrieval head fine-tuning
-# =====================================================
-# -----------------------------------------------
-# 1.1 Using LVD-1689M pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/1_lvd1689m/1_patient_ret_head_fine_tune
-mkdir -p "$OUT"
+HEAD_LR=0.0003
+FULL_HEAD_LR=0.0001
+FULL_BACKBONE_LR=0.00001
 
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
+run_ret_experiment() {
+  local stage_name="$1"
+  local pretrain_name="$2"
+  local weights_filepath="$3"
+  local out_dir="$4"
+  local fine_tune="$5"
+  local lr="$6"
+  local backbone_lr="${7:-}"
+  local fine_tune_args=()
+  local backbone_lr_args=()
 
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
+  if [[ "$fine_tune" == "true" ]]; then
+    fine_tune_args+=(--fine-tune)
+  fi
+  if [[ -n "$backbone_lr" ]]; then
+    backbone_lr_args+=(--backbone-lr "$backbone_lr")
+  fi
 
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
+  mkdir -p "$out_dir"
 
-# -----------------------------------------------
-# 1.2 Using ImageNet-1k pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/2_imagenet1k/1_patient_ret_head_fine_tune
-mkdir -p "$OUT"
+  echo "========================================" | tee -a "$out_dir/train.log"
+  echo "==== START Patient Retrieval ${stage_name} Fine-tuning (${pretrain_name}): $(date) ====" | tee -a "$out_dir/train.log"
+  echo "========================================" | tee -a "$out_dir/train.log"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS MAX_EPOCHS=$MAX_EPOCHS PROJ_DIM=$PROJ_DIM HEAD_LR=$lr BACKBONE_LR=${backbone_lr:-none} EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$out_dir/train.log"
 
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
+  stdbuf -oL -eL python train_retrieval.py \
+    --train-dir "$TRAIN_DIR" \
+    --valid-dir "$VALID_DIR" \
+    --weights "$weights_filepath" \
+    --repo-dir dinov3 \
+    --model-name "$MODEL_NAME" \
+    --max-epochs "$MAX_EPOCHS" \
+    --out-dir "$out_dir" \
+    --config "$RET_CONFIG" \
+    --num-workers "$NUM_WORKERS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$lr" \
+    --proj-dim "$PROJ_DIM" \
+    --early-stopping \
+    --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
+    --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
+    --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
+    "${backbone_lr_args[@]}" \
+    "${fine_tune_args[@]}" \
+    2>&1 | tee -a "$out_dir/train.log"
 
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
-
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
-
-# -----------------------------------------------
-# 1.3 Using CAG-Contrast-FM-3M pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/3_cagcontfm3m/1_patient_ret_head_fine_tune
-mkdir -p "$OUT"
-
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
-
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
-
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Head Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
+  echo "==== END Patient Retrieval ${stage_name} Fine-tuning (${pretrain_name}): $(date) ====" | tee -a "$out_dir/train.log"
+  echo "" | tee -a "$out_dir/train.log"
+}
 
 # =====================================================
-# 2. Patient retrieval full fine-tuning
+# 1. Patient retrieval full fine-tuning
 # =====================================================
-# -----------------------------------------------
-# 2.1 Using LVD-1689M pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/1_lvd1689m/2_patient_ret_full_fine_tune
-mkdir -p "$OUT"
+run_ret_experiment \
+  "Full" \
+  "LVD-1689M" \
+  "weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/1_lvd1689m/2_patient_ret_full_finetune" \
+  "true" \
+  "$FULL_HEAD_LR" \
+  "$FULL_BACKBONE_LR"
 
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
+run_ret_experiment \
+  "Full" \
+  "ImageNet-1K" \
+  "dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/2_imagenet1k/2_patient_ret_full_finetune" \
+  "true" \
+  "$FULL_HEAD_LR" \
+  "$FULL_BACKBONE_LR"
 
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --fine-tune \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
+run_ret_experiment \
+  "Full" \
+  "CAG-Contrast-FM-3M" \
+  "dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/3_cagcontfm3m/2_patient_ret_full_finetune" \
+  "true" \
+  "$FULL_HEAD_LR" \
+  "$FULL_BACKBONE_LR"
 
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
+# =====================================================
+# 2. Patient retrieval head fine-tuning
+# =====================================================
+run_ret_experiment \
+  "Head" \
+  "LVD-1689M" \
+  "weights/dinov3_vits16_pretrain_lvd1689m-08c60483.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/1_lvd1689m/1_patient_ret_head_finetune" \
+  "false" \
+  "$HEAD_LR"
 
-# -----------------------------------------------
-# 2.2 Using ImageNet-1k pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/2_imagenet1k/2_patient_ret_full_fine_tune
-mkdir -p "$OUT"
+run_ret_experiment \
+  "Head" \
+  "ImageNet-1K" \
+  "dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/2_imagenet1k/1_patient_ret_head_finetune" \
+  "false" \
+  "$HEAD_LR"
 
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
-
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --fine-tune \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
-
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
-
-# -----------------------------------------------
-# 2.3 Using CAG-Contrast-FM-3M pre-trained weights
-# -----------------------------------------------
-WEIGHTS_FILEPATH=dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth
-OUT=outputs/2_finetune/2_ret/${MODEL_NAME}/3_cagcontfm3m/2_patient_ret_full_fine_tune
-mkdir -p "$OUT"
-
-# 실행 시작 시각 로그
-echo "========================================" | tee -a "$OUT/train.log"
-echo "==== START Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "========================================" | tee -a "$OUT/train.log"
-echo "BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS PROJ_DIM=$PROJ_DIM EARLY_STOPPING_MONITOR=$EARLY_STOPPING_MONITOR PATIENCE=$EARLY_STOPPING_PATIENCE" | tee -a "$OUT/train.log"
-
-stdbuf -oL -eL python train_retrieval.py \
-  --train-dir "$TRAIN_DIR" \
-  --valid-dir "$VALID_DIR" \
-  --weights "$WEIGHTS_FILEPATH" \
-  --repo-dir dinov3 \
-  --model-name "$MODEL_NAME" \
-  --max-epochs 1000 \
-  --fine-tune \
-  --out-dir "$OUT" \
-  --config configs_retrieval/patients.yaml \
-  --num-workers "$NUM_WORKERS" \
-  --batch-size "$BATCH_SIZE" \
-  --proj-dim "$PROJ_DIM" \
-  --early-stopping \
-  --early-stopping-patience "$EARLY_STOPPING_PATIENCE" \
-  --early-stopping-min-delta "$EARLY_STOPPING_MIN_DELTA" \
-  --early-stopping-monitor "$EARLY_STOPPING_MONITOR" \
-  2>&1 | tee -a "$OUT/train.log"
-
-# 실행 종료 시각 로그
-echo "==== END Patient Retrieval Full Fine-tuning: $(date) ====" | tee -a "$OUT/train.log"
-echo "" | tee -a "$OUT/train.log"
+run_ret_experiment \
+  "Head" \
+  "CAG-Contrast-FM-3M" \
+  "dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth" \
+  "outputs/2_finetune/2_ret/${MODEL_NAME}/3_cagcontfm3m/1_patient_ret_head_finetune" \
+  "false" \
+  "$HEAD_LR"

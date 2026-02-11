@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -25,6 +26,11 @@ torch.cuda.manual_seed_all(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
+
+def log_with_time(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
 # Construct the argument parser.
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -43,7 +49,21 @@ parser.add_argument(
     default=0.001,
     help="Learning rate for training the model",
 )
+parser.add_argument(
+    "--backbone-lr",
+    type=float,
+    dest="backbone_lr",
+    default=None,
+    help="Learning rate for backbone parameters during full fine-tuning",
+)
 parser.add_argument("-b", "--batch-size", dest="batch_size", default=32, type=int)
+parser.add_argument(
+    "--num-workers",
+    dest="num_workers",
+    default=4,
+    type=int,
+    help="number of dataloader worker processes",
+)
 parser.add_argument(
     "--save-name",
     dest="save_name",
@@ -128,15 +148,56 @@ parser.add_argument(
     help="metric to monitor for early stopping",
 )
 args = parser.parse_args()
-print(args)
+log_with_time(f"Args: {args}")
 
-DINOV3_REPO, _ = get_dinov3_paths()
+
+def resolve_repo_path(repo_dir_arg, env_repo_dir):
+    if repo_dir_arg:
+        repo_path = os.path.abspath(os.path.expanduser(repo_dir_arg))
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"DINOv3 repository not found at: {repo_path}")
+        return repo_path
+
+    if not env_repo_dir:
+        raise ValueError(
+            "DINOv3 repository path is missing. "
+            "Set DINOV3_REPO in .env or pass --repo-dir."
+        )
+
+    return env_repo_dir
+
+
+def resolve_weights_path(weights_arg, env_weights_dir):
+    candidate_path = os.path.expanduser(weights_arg)
+    if os.path.isabs(candidate_path):
+        if os.path.exists(candidate_path):
+            return candidate_path
+        raise FileNotFoundError(f"Pretrained weights not found at: {candidate_path}")
+
+    local_candidate = os.path.abspath(candidate_path)
+    if os.path.exists(local_candidate):
+        return local_candidate
+
+    if env_weights_dir:
+        env_candidate = os.path.join(env_weights_dir, candidate_path)
+        if os.path.exists(env_candidate):
+            return env_candidate
+
+    raise FileNotFoundError(
+        "Pretrained weights not found. "
+        f"Checked local path '{local_candidate}'"
+        + (
+            f" and '{os.path.join(env_weights_dir, candidate_path)}'."
+            if env_weights_dir
+            else "."
+        )
+    )
 
 
 # Training function.
 def train(model, trainloader, optimizer, criterion):
     model.train()
-    print("Training")
+    log_with_time("Training")
     train_running_loss = 0.0
     train_running_correct = 0
     counter = 0
@@ -168,7 +229,7 @@ def train(model, trainloader, optimizer, criterion):
 # Validation function.
 def validate(model, testloader, criterion, class_names):
     model.eval()
-    print("Validation")
+    log_with_time("Validation")
     valid_running_loss = 0.0
     valid_running_correct = 0
     counter = 0
@@ -196,13 +257,25 @@ def validate(model, testloader, criterion, class_names):
 
 
 if __name__ == "__main__":
+    DINOV3_REPO, DINOV3_WEIGHTS = get_dinov3_paths(
+        require_repo=not bool(args.repo_dir),
+        require_weights=False,
+    )
+    repo_dir = resolve_repo_path(args.repo_dir, DINOV3_REPO)
+    weights_path = resolve_weights_path(args.weights, DINOV3_WEIGHTS)
+    log_with_time(f"DINOv3 repo: {repo_dir}")
+    log_with_time(f"Backbone weights: {weights_path}")
 
-    print("=============== CUDA Device ===============")
-    print("CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES"))
-    print("torch.cuda.device_count():", torch.cuda.device_count())
-    print("torch.cuda.current_device():", torch.cuda.current_device())
-    print("torch.cuda.get_device_name(0):", torch.cuda.get_device_name(0))
-    print("===========================================")
+    log_with_time("=============== CUDA Device ===============")
+    log_with_time(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES')}")
+    cuda_device_count = torch.cuda.device_count()
+    log_with_time(f"torch.cuda.device_count(): {cuda_device_count}")
+    if cuda_device_count > 0:
+        log_with_time(f"torch.cuda.current_device(): {torch.cuda.current_device()}")
+        log_with_time(f"torch.cuda.get_device_name(0): {torch.cuda.get_device_name(0)}")
+    else:
+        log_with_time("CUDA is not available. Running on CPU.")
+    log_with_time("===========================================")
 
     # Create a directory with the model name for outputs.
     # out_dir = os.path.join("outputs", args.out_dir)
@@ -218,23 +291,29 @@ if __name__ == "__main__":
         resize=config["RESIZE_SIZE"],
         center_crop=config["CENTER_CROP_SIZE"],
     )
-    print(f"[INFO]: Number of training images: {len(dataset_train)}")
-    print(f"[INFO]: Number of validation images: {len(dataset_valid)}")
-    print(f"[INFO]: Classes: {dataset_classes}")
+    log_with_time(f"[INFO]: Number of training images: {len(dataset_train)}")
+    log_with_time(f"[INFO]: Number of validation images: {len(dataset_valid)}")
+    log_with_time(f"[INFO]: Classes: {dataset_classes}")
     # Load the training and validation data loaders.
     train_loader, valid_loader = get_data_loaders(
-        dataset_train, dataset_valid, batch_size=args.batch_size
+        dataset_train,
+        dataset_valid,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
 
     # Learning_parameters.
     lr = args.learning_rate
     epochs = args.max_epochs
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Computation device: {device}")
-    print(f"Learning rate: {lr}")
-    print(f"Max epochs to train for: {epochs}\n")
+    log_with_time(f"Computation device: {device}")
+    if args.fine_tune and args.backbone_lr is not None:
+        log_with_time(f"Learning rates: head={lr}, backbone={args.backbone_lr}")
+    else:
+        log_with_time(f"Learning rate: {lr}")
+    log_with_time(f"Max epochs to train for: {epochs}")
     if args.early_stopping:
-        print(
+        log_with_time(
             "Early stopping enabled "
             f"(monitor={args.early_stopping_monitor}, "
             f"patience={args.early_stopping_patience}, "
@@ -245,23 +324,37 @@ if __name__ == "__main__":
     model = Dinov3Classification(
         num_classes=len(dataset_classes),
         fine_tune=args.fine_tune,
-        # weights=os.path.join(DINOV3_WEIGHTS, args.weights),
-        weights=args.weights,
+        weights=weights_path,
         model_name=args.model_name,
-        repo_dir=DINOV3_REPO,
+        repo_dir=repo_dir,
     ).to(device)
     print(model)
 
     # Total parameters and trainable parameters.
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"{total_params:,} total parameters.")
+    log_with_time(f"{total_params:,} total parameters.")
     total_trainable_params = sum(
         p.numel() for p in model.parameters() if p.requires_grad
     )
-    print(f"{total_trainable_params:,} training parameters.")
+    log_with_time(f"{total_trainable_params:,} training parameters.")
 
     # Optimizer.
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, nesterov=True)
+    if args.fine_tune and args.backbone_lr is not None:
+        optimizer = optim.SGD(
+            [
+                {"params": model.backbone_model.parameters(), "lr": args.backbone_lr},
+                {"params": model.head.parameters(), "lr": lr},
+            ],
+            momentum=0.9,
+            nesterov=True,
+        )
+    else:
+        optimizer = optim.SGD(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=lr,
+            momentum=0.9,
+            nesterov=True,
+        )
     # optimizer = optim.Adam(model.parameters(), lr=lr)
     # Loss function.
     criterion = nn.CrossEntropyLoss()
@@ -283,7 +376,7 @@ if __name__ == "__main__":
         best_metric = -float("inf")
     patience_counter = 0
     for epoch in range(epochs):
-        print(f"[INFO]: Epoch {epoch+1} of {epochs}")
+        log_with_time(f"[INFO]: Epoch {epoch+1} of {epochs}")
         train_epoch_loss, train_epoch_acc = train(
             model, train_loader, optimizer, criterion
         )
@@ -294,10 +387,10 @@ if __name__ == "__main__":
         valid_loss.append(valid_epoch_loss)
         train_acc.append(train_epoch_acc)
         valid_acc.append(valid_epoch_acc)
-        print(
+        log_with_time(
             f"Training loss: {train_epoch_loss:.3f}, training acc: {train_epoch_acc:.3f}"
         )
-        print(
+        log_with_time(
             f"Validation loss: {valid_epoch_loss:.3f}, validation acc: {valid_epoch_acc:.3f}"
         )
         save_best_model(valid_epoch_loss, epoch, model, out_dir, args.save_name)
@@ -318,20 +411,20 @@ if __name__ == "__main__":
                 patience_counter = 0
             else:
                 patience_counter += 1
-                print(
+                log_with_time(
                     "EarlyStopping counter: "
                     f"{patience_counter} of {args.early_stopping_patience}"
                 )
                 if patience_counter >= args.early_stopping_patience:
-                    print(f"Early stopping triggered at epoch {epoch+1}")
+                    log_with_time(f"Early stopping triggered at epoch {epoch+1}")
                     break
-        print("-" * 50)
+        log_with_time("-" * 50)
         scheduler.step()
         last_lr = scheduler.get_last_lr()
-        print(f"LR for next epoch: {last_lr}")
+        log_with_time(f"LR for next epoch: {last_lr}")
 
     # Save the trained model weights.
     save_model(epochs_trained, model, optimizer, criterion, out_dir, args.save_name)
     # Save the loss and accuracy plots.
     save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir)
-    print("TRAINING COMPLETE")
+    log_with_time("TRAINING COMPLETE")

@@ -218,7 +218,7 @@ def save_plots(
 # Define the torchvision image transforms
 def infer_transform(img_size):
     transform = A.Compose([
-        A.Resize(img_size[1], img_size[0], always_apply=True),
+        A.Resize(img_size[1], img_size[0]),
         A.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
