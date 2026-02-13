@@ -293,15 +293,42 @@ transform = transforms.Compose(
 # Model
 # --------------------------------------------------
 checkpoint = torch.load(args.weights, map_location="cpu")
+if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+    model_state_dict = checkpoint["model_state_dict"]
+elif isinstance(checkpoint, dict):
+    model_state_dict = checkpoint
+else:
+    raise ValueError(
+        f"Invalid checkpoint format for classification eval: {args.weights}"
+    )
+
+if not isinstance(model_state_dict, dict):
+    raise ValueError(
+        "Invalid `model_state_dict` in checkpoint. Expected a dictionary of tensors."
+    )
 
 model = Dinov3Classification(
     num_classes=len(CLASS_NAMES),
+    weights=args.weights,
     model_name=args.model_name,
     repo_dir=DINOV3_REPO,
 ).to(DEVICE)
 
-model.load_state_dict(checkpoint["model_state_dict"])
+model.load_state_dict(model_state_dict, strict=True)
 model.eval()
+
+checkpoint_abs = os.path.abspath(args.weights)
+checkpoint_epoch = checkpoint.get("epoch") if isinstance(checkpoint, dict) else None
+if checkpoint_epoch is not None:
+    print(
+        f"Loaded classification checkpoint (backbone+head, strict=True): "
+        f"{checkpoint_abs} (epoch={checkpoint_epoch})"
+    )
+else:
+    print(
+        f"Loaded classification checkpoint (backbone+head, strict=True): "
+        f"{checkpoint_abs}"
+    )
 
 
 # --------------------------------------------------
