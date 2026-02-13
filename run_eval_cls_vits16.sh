@@ -1,107 +1,84 @@
 #!/bin/bash
+set -e
+set -o pipefail
 
-# python eval_classifier.py \
-# --weights outputs/transfer_learn/best_model.pth \
-# --input input/archive/test \
-# --config classification_configs/cards.yaml \
-# --model-name dinov3_convnext_tiny \
+export CUDA_VISIBLE_DEVICES=1
 
-# python eval_classifier.py \
-# --weights outputs/train/stent_cls/best_model.pth \
-# --input input/stent_split_img/test \
-# --config classification_configs/stent.yaml \
-# --model-name dinov3_convnext_tiny \
-# --out-dir outputs/eval/stent_cls
-
-# ======================================================
-# Setup
-# ======================================================
 MODEL_NAME=dinov3_vits16
+INPUT_DIR=input/Stent-First-Frame/test
+CLS_CONFIG=configs_classification/stent.yaml
 OUTPUT_ROOT=outputs/3_eval/1_cls/${MODEL_NAME}
-mkdir -p ${OUTPUT_ROOT}
+
+mkdir -p "$OUTPUT_ROOT"
+
+run_cls_eval() {
+  local stage_name="$1"
+  local pretrain_name="$2"
+  local weights_filepath="$3"
+  local eval_out_dir="$4"
+
+  if [[ ! -f "$weights_filepath" ]]; then
+    echo "[ERROR] Missing checkpoint: $weights_filepath"
+    return 1
+  fi
+
+  mkdir -p "$eval_out_dir"
+
+  echo "========================================" | tee -a "$eval_out_dir/eval.log"
+  echo "==== START Classification Eval (${stage_name}, ${pretrain_name}): $(date) ====" | tee -a "$eval_out_dir/eval.log"
+  echo "========================================" | tee -a "$eval_out_dir/eval.log"
+  echo "CHECKPOINT=$weights_filepath INPUT=$INPUT_DIR" | tee -a "$eval_out_dir/eval.log"
+
+  stdbuf -oL -eL python eval_classifier.py \
+    --weights "$weights_filepath" \
+    --input "$INPUT_DIR" \
+    --config "$CLS_CONFIG" \
+    --model-name "$MODEL_NAME" \
+    --out-dir "$eval_out_dir" \
+    2>&1 | tee -a "$eval_out_dir/eval.log"
+
+  echo "==== END Classification Eval (${stage_name}, ${pretrain_name}): $(date) ====" | tee -a "$eval_out_dir/eval.log"
+  echo "" | tee -a "$eval_out_dir/eval.log"
+}
 
 # ======================================================
-# 1. Card classification head fine-tuning evaluation
+# 1. Stent classification full fine-tuning evaluation
 # ======================================================
-# python eval_classifier.py \
-# --weights outputs/train/vits16/1_card_cls_head_fine_tune/best_model.pth \
-# --input input/archive/test \
-# --config classification_configs/cards.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/1_card_cls_head_fine_tune
+run_cls_eval \
+  "Full" \
+  "LVD-1689M" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/1_lvd1689m/2_stent_full_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/1_lvd1689m/2_stent_full_finetune"
+
+run_cls_eval \
+  "Full" \
+  "ImageNet-1K" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/2_imagenet1k/2_stent_full_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/2_imagenet1k/2_stent_full_finetune"
+
+run_cls_eval \
+  "Full" \
+  "CAG-Contrast-FM-3M" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/3_cagcontfm3m/2_stent_full_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/3_cagcontfm3m/2_stent_full_finetune"
 
 # ======================================================
-# 2. Card classification full fine-tuning evaluation
+# 2. Stent classification head fine-tuning evaluation
 # ======================================================
-# python eval_classifier.py \
-# --weights outputs/train/vits16/2_card_cls_full_fine_tune/best_model.pth \
-# --input input/archive/test/ \
-# --config classification_configs/cards.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/2_card_cls_full_fine_tune
+run_cls_eval \
+  "Head" \
+  "LVD-1689M" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/1_lvd1689m/1_stent_head_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/1_lvd1689m/1_stent_head_finetune"
 
-# ======================================================
-# 3. Stent classification head fine-tuning evaluation
-# ======================================================
-# -----------------------------------------------
-# 3.1 Using LV-D1689M pre-trained weights
-# -----------------------------------------------
-# python eval_classifier.py \
-# --weights outputs/2_finetune/dinov3_vits16/1_lvd1689m/1_cls/1_stent_head_fine_tune/best_model.pth \
-# --input input/Stent-First-Frame/test \
-# --config configs_classification/stent.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/1_lvd1689m/1_cls/1_stent_head_fine_tune
+run_cls_eval \
+  "Head" \
+  "ImageNet-1K" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/2_imagenet1k/1_stent_head_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/2_imagenet1k/1_stent_head_finetune"
 
-# -----------------------------------------------
-# 3.2 Using ImageNet-1K pre-trained weights
-# -----------------------------------------------
-# python eval_classifier.py \
-# --weights outputs/2_finetune/1_cls/dinov3_vits16/2_imagenet1k/1_stent_head_finetune/best_model.pth \
-# --input input/Stent-First-Frame/test \
-# --config configs_classification/stent.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/2_imagenet1k/1_stent_head_finetune
-
-# -----------------------------------------------
-# 3.3 Using CAGCont-FM3M pre-trained weights
-# -----------------------------------------------
-python eval_classifier.py \
---weights outputs/2_finetune/1_cls/dinov3_vits16/3_cagcontfm3m/1_stent_head_finetune/best_model.pth \
---input input/Stent-First-Frame/test \
---config configs_classification/stent.yaml \
---model-name ${MODEL_NAME} \
---out-dir ${OUTPUT_ROOT}/3_cagcontfm3m/1_stent_head_finetune
-
-# ======================================================
-# 4. Stent classification full fine-tuning evaluation
-# ======================================================
-# -----------------------------------------------
-# 4.1 Using LV-D1689M pre-trained weights
-# -----------------------------------------------
-# python eval_classifier.py \
-# --weights outputs/2_finetune/dinov3_vits16/1_lvd1689m/1_cls/2_stent_full_fine_tune/best_model.pth \
-# --input input/Stent-First-Frame/test \
-# --config configs_classification/stent.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/1_lvd1689m/1_cls/2_stent_full_fine_tune
-
-# -----------------------------------------------
-# 4.2 Using ImageNet-1K pre-trained weights
-# -----------------------------------------------
-# python eval_classifier.py \
-# --weights outputs/2_finetune/1_cls/dinov3_vits16/2_imagenet1k/2_stent_full_finetune/best_model.pth \
-# --input input/Stent-First-Frame/test \
-# --config configs_classification/stent.yaml \
-# --model-name ${MODEL_NAME} \
-# --out-dir ${OUTPUT_ROOT}/2_imagenet1k/2_stent_full_finetune
-
-# -----------------------------------------------
-# 4.3 Using CAGCont-FM3M pre-trained weights
-# -----------------------------------------------
-python eval_classifier.py \
---weights outputs/2_finetune/1_cls/dinov3_vits16/3_cagcontfm3m/2_stent_full_finetune/best_model.pth \
---input input/Stent-First-Frame/test \
---config configs_classification/stent.yaml \
---model-name ${MODEL_NAME} \
---out-dir ${OUTPUT_ROOT}/3_cagcontfm3m/2_stent_full_finetune
+run_cls_eval \
+  "Head" \
+  "CAG-Contrast-FM-3M" \
+  "outputs/2_finetune/1_cls/${MODEL_NAME}/3_cagcontfm3m/1_stent_head_finetune/best_model.pth" \
+  "${OUTPUT_ROOT}/3_cagcontfm3m/1_stent_head_finetune"

@@ -1,8 +1,8 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=1
-
 set -e
 set -o pipefail
+
+export CUDA_VISIBLE_DEVICES=1
 
 MODEL_NAME=dinov3_vits16
 EVAL_IMAGES_DIR=input/MPXA-Seg/test_images
@@ -13,12 +13,15 @@ IMG_WIDTH=640
 IMG_HEIGHT=640
 BATCH_SIZE=64
 NUM_WORKERS=32
+OUTPUT_ROOT=outputs/3_eval/3_seg/${MODEL_NAME}
 
 # Segmentation selection metric: best IoU checkpoint is generally more aligned
 # with downstream segmentation quality than best loss checkpoint.
 BEST_MODEL_CHECKPOINT=best_model_iou.pth
 
-run_eval_experiment() {
+mkdir -p "$OUTPUT_ROOT"
+
+run_seg_eval() {
   local stage_name="$1"
   local pretrain_name="$2"
   local trained_out_dir="$3"
@@ -56,41 +59,41 @@ run_eval_experiment() {
 # ===================================================================
 # 1. Segmentation evaluation with MPXA-Seg test set - Full fine-tuning
 # ===================================================================
-# run_eval_experiment \
-#   "Full" \
-#   "LVD-1689M" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune"
+run_seg_eval \
+  "Full" \
+  "LVD-1689M" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/2_cor_seg_full_finetune" \
+  "${OUTPUT_ROOT}/1_lvd1689m/2_cor_seg_full_finetune"
 
-# run_eval_experiment \
-#   "Full" \
-#   "ImageNet-1K" \
-#   "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune" \
-#   "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune"
+run_seg_eval \
+  "Full" \
+  "ImageNet-1K" \
+  "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/2_cor_seg_full_finetune" \
+  "${OUTPUT_ROOT}/2_imagenet1k/2_cor_seg_full_finetune"
 
-run_eval_experiment \
+run_seg_eval \
   "Full" \
   "CAG-Contrast-FM-3M" \
   "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/2_cor_seg_full_finetune"
+  "${OUTPUT_ROOT}/3_cagcontfm3m/2_cor_seg_full_finetune"
 
 # ===================================================================
 # 2. Segmentation evaluation with MPXA-Seg test set - Head fine-tuning
 # ===================================================================
-run_eval_experiment \
+run_seg_eval \
   "Head" \
   "LVD-1689M" \
   "outputs/2_finetune/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/1_lvd1689m/1_cor_seg_head_finetune"
+  "${OUTPUT_ROOT}/1_lvd1689m/1_cor_seg_head_finetune"
 
-run_eval_experiment \
+run_seg_eval \
   "Head" \
   "ImageNet-1K" \
   "outputs/2_finetune/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/2_imagenet1k/1_cor_seg_head_finetune"
+  "${OUTPUT_ROOT}/2_imagenet1k/1_cor_seg_head_finetune"
 
-run_eval_experiment \
+run_seg_eval \
   "Head" \
   "CAG-Contrast-FM-3M" \
   "outputs/2_finetune/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune" \
-  "outputs/3_eval/3_seg/${MODEL_NAME}/3_cagcontfm3m/1_cor_seg_head_finetune"
+  "${OUTPUT_ROOT}/3_cagcontfm3m/1_cor_seg_head_finetune"
