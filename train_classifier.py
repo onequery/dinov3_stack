@@ -77,6 +77,16 @@ parser.add_argument(
     help="whether to fine-tune the model or train the classifier layer only",
 )
 parser.add_argument(
+    "--unfreeze-blocks",
+    dest="unfreeze_blocks",
+    type=int,
+    default=None,
+    help=(
+        "number of last ViT blocks to unfreeze when --fine-tune is set. "
+        "Use 0 for linear probe, 12 for full fine-tune on ViT-S/16."
+    ),
+)
+parser.add_argument(
     "--out-dir",
     dest="out_dir",
     default="img_cls",
@@ -149,6 +159,13 @@ parser.add_argument(
 )
 args = parser.parse_args()
 log_with_time(f"Args: {args}")
+if args.unfreeze_blocks is not None and args.unfreeze_blocks < 0:
+    raise ValueError("--unfreeze-blocks must be >= 0")
+if not args.fine_tune and args.unfreeze_blocks not in (None, 0):
+    raise ValueError(
+        "--unfreeze-blocks > 0 requires --fine-tune. "
+        "For linear probe, use --unfreeze-blocks 0 without --fine-tune."
+    )
 
 
 def resolve_repo_path(repo_dir_arg, env_repo_dir):
@@ -324,11 +341,13 @@ if __name__ == "__main__":
     model = Dinov3Classification(
         num_classes=len(dataset_classes),
         fine_tune=args.fine_tune,
+        unfreeze_last_n_blocks=args.unfreeze_blocks,
         weights=weights_path,
         model_name=args.model_name,
         repo_dir=repo_dir,
     ).to(device)
     print(model)
+    log_with_time(f"Backbone trainability: {model.backbone_trainability}")
 
     # Total parameters and trainable parameters.
     total_params = sum(p.numel() for p in model.parameters())

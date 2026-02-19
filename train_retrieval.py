@@ -25,7 +25,7 @@ import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from src.utils.common import get_dinov3_paths
+from src.utils.common import configure_backbone_trainability, get_dinov3_paths
 
 # -------------------------
 # Reproducibility
@@ -420,6 +420,7 @@ class Dinov3Retrieval(nn.Module):
         backbone_embed_dim,
         retrieval_embedding_dim=128,
         fine_tune=False,
+        unfreeze_last_n_blocks=None,
     ):
         super().__init__()
         self.backbone = backbone
@@ -431,9 +432,11 @@ class Dinov3Retrieval(nn.Module):
             nn.Linear(backbone_embed_dim, retrieval_embedding_dim),
         )
 
-        if not fine_tune:
-            for p in self.backbone.parameters():
-                p.requires_grad = False
+        self.backbone_trainability = configure_backbone_trainability(
+            self.backbone,
+            fine_tune=fine_tune,
+            unfreeze_last_n_blocks=unfreeze_last_n_blocks,
+        )
 
     def forward(self, x):
         feat = self.backbone(x)
@@ -584,6 +587,15 @@ def main():
     )
     parser.add_argument("--proj-dim", type=int, default=128)
     parser.add_argument("--fine-tune", action="store_true")
+    parser.add_argument(
+        "--unfreeze-blocks",
+        type=int,
+        default=None,
+        help=(
+            "number of last ViT blocks to unfreeze when --fine-tune is set. "
+            "Use 0 for linear probe, 12 for full fine-tune on ViT-S/16."
+        ),
+    )
     parser.add_argument("--out-dir", default="outputs/train_retrieval")
     parser.add_argument("--model-name", default="dinov3_vits16")
     parser.add_argument("--weights", required=True)
@@ -622,6 +634,13 @@ def main():
     )
     parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
+    if args.unfreeze_blocks is not None and args.unfreeze_blocks < 0:
+        raise ValueError("--unfreeze-blocks must be >= 0")
+    if not args.fine_tune and args.unfreeze_blocks not in (None, 0):
+        raise ValueError(
+            "--unfreeze-blocks > 0 requires --fine-tune. "
+            "For linear probe, use --unfreeze-blocks 0 without --fine-tune."
+        )
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -676,6 +695,7 @@ def main():
         backbone_embed_dim=backbone_embed_dim,
         retrieval_embedding_dim=args.proj_dim,
         fine_tune=args.fine_tune,
+        unfreeze_last_n_blocks=args.unfreeze_blocks,
     ).to(
         device
     )
@@ -702,11 +722,13 @@ def main():
         f"| batch_size={args.batch_size} "
         f"| num_workers={args.num_workers} | lr={args.lr} "
         f"| backbone_lr={args.backbone_lr if args.backbone_lr is not None else 'default'} "
+        f"| unfreeze_blocks={args.unfreeze_blocks if args.unfreeze_blocks is not None else 'full'} "
         f"| max_epochs={args.max_epochs} | early_stopping={args.early_stopping} "
         f"| weights={weights_path} "
         f"| monitor={args.early_stopping_monitor} "
         f"| patience={args.early_stopping_patience}"
     )
+    print(f"[{start_ts}] Backbone trainability | {model.backbone_trainability}")
     print(
         f"[{start_ts}] Backbone load | source={load_report['state_source']} "
         f"| config={load_report['config_path'] if load_report['config_path'] else 'none'} "

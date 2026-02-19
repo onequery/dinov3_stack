@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import yaml
 
+from src.utils.common import configure_backbone_trainability
+
 
 def _unwrap_state_dict(checkpoint: Any) -> Dict[str, torch.Tensor]:
     if not isinstance(checkpoint, dict):
@@ -381,6 +383,7 @@ class Dinov3Classification(nn.Module):
     def __init__(
         self,
         fine_tune: bool = False,
+        unfreeze_last_n_blocks: int | None = None,
         num_classes: int = 2,
         weights: str | None = None,
         model_name: str | None = None,
@@ -398,9 +401,11 @@ class Dinov3Classification(nn.Module):
             bias=True,
         )
 
-        if not fine_tune:
-            for params in self.backbone_model.parameters():
-                params.requires_grad = False
+        self.backbone_trainability = configure_backbone_trainability(
+            self.backbone_model,
+            fine_tune=fine_tune,
+            unfreeze_last_n_blocks=unfreeze_last_n_blocks,
+        )
 
     def forward(self, x):
         features = self.backbone_model(x)

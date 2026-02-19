@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from torchinfo import summary
+from src.utils.common import configure_backbone_trainability
 
 model_feature_layers = {
     "dinov3_vits16": [3, 5, 7, 11],
@@ -394,6 +395,7 @@ class Dinov3Segmentation(nn.Module):
     def __init__(
         self,
         fine_tune: bool = False,
+        unfreeze_last_n_blocks: int | None = None,
         num_classes: int = 2,
         weights: str = None,
         model_name: str = None,
@@ -409,12 +411,11 @@ class Dinov3Segmentation(nn.Module):
         )
         self.num_classes = num_classes
 
-        if fine_tune:
-            for name, param in self.backbone_model.named_parameters():
-                param.requires_grad = True
-        else:
-            for name, param in self.backbone_model.named_parameters():
-                param.requires_grad = False
+        self.backbone_trainability = configure_backbone_trainability(
+            self.backbone_model,
+            fine_tune=fine_tune,
+            unfreeze_last_n_blocks=unfreeze_last_n_blocks,
+        )
 
         self.feature_extractor_layers = (
             1 if feature_extractor == "last" else model_feature_layers[self.model_name]

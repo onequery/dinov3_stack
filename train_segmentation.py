@@ -131,6 +131,16 @@ parser.add_argument(
 )
 parser.add_argument("--fine-tune", dest="fine_tune", action="store_true")
 parser.add_argument(
+    "--unfreeze-blocks",
+    dest="unfreeze_blocks",
+    default=None,
+    type=int,
+    help=(
+        "number of last ViT blocks to unfreeze when --fine-tune is set. "
+        "Use 0 for linear probe, 12 for full fine-tune on ViT-S/16."
+    ),
+)
+parser.add_argument(
     "--feature-extractor",
     dest="feature_extractor",
     default="multi",
@@ -139,6 +149,13 @@ parser.add_argument(
 )
 args = parser.parse_args()
 log_with_time(f"Args: {args}")
+if args.unfreeze_blocks is not None and args.unfreeze_blocks < 0:
+    raise ValueError("--unfreeze-blocks must be >= 0")
+if not args.fine_tune and args.unfreeze_blocks not in (None, 0):
+    raise ValueError(
+        "--unfreeze-blocks > 0 requires --fine-tune. "
+        "For linear probe, use --unfreeze-blocks 0 without --fine-tune."
+    )
 
 
 def resolve_repo_path(repo_dir_arg, env_repo_dir):
@@ -209,6 +226,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = Dinov3Segmentation(
         fine_tune=args.fine_tune,
+        unfreeze_last_n_blocks=args.unfreeze_blocks,
         num_classes=len(ALL_CLASSES),
         weights=weights_path,
         model_name=args.model_name,
@@ -216,6 +234,7 @@ if __name__ == "__main__":
         feature_extractor=args.feature_extractor,
     )
     _ = model.to(device)
+    log_with_time(f"Backbone trainability: {model.backbone_trainability}")
     summary(
         model,
         (1, 3, 448, 448),
