@@ -107,6 +107,68 @@ run_logged() {
   stdbuf -oL -eL "$@" 2>&1 | tee -a "$log_file"
 }
 
+has_glob_match() {
+  local pattern="$1"
+  compgen -G "$pattern" >/dev/null
+}
+
+is_cls_train_complete() {
+  local train_dir="$1"
+  [[ -f "${train_dir}/model.pth" ]]
+}
+
+is_ret_train_complete() {
+  local train_dir="$1"
+  [[ -f "${train_dir}/model.pth" ]]
+}
+
+is_seg_train_complete() {
+  local train_dir="$1"
+  [[ -f "${train_dir}/final_model.pth" ]]
+}
+
+is_cls_eval_complete() {
+  local eval_dir="$1"
+  has_glob_match "${eval_dir}/per_image_predictions_*.csv"
+}
+
+is_ret_eval_complete() {
+  local eval_dir="$1"
+  has_glob_match "${eval_dir}/retrieval_result_*.txt"
+}
+
+is_seg_eval_complete() {
+  local eval_dir="$1"
+  [[ -f "${eval_dir}/metrics.json" ]]
+}
+
+select_cls_ckpt() {
+  local train_dir="$1"
+  if [[ -f "${train_dir}/best_model.pth" ]]; then
+    echo "${train_dir}/best_model.pth"
+  else
+    echo "${train_dir}/model.pth"
+  fi
+}
+
+select_ret_ckpt() {
+  local train_dir="$1"
+  if [[ -f "${train_dir}/best_model.pth" ]]; then
+    echo "${train_dir}/best_model.pth"
+  else
+    echo "${train_dir}/model.pth"
+  fi
+}
+
+select_seg_ckpt() {
+  local train_dir="$1"
+  if [[ -f "${train_dir}/${SEG_BEST_CHECKPOINT}" ]]; then
+    echo "${train_dir}/${SEG_BEST_CHECKPOINT}"
+  else
+    echo "${train_dir}/final_model.pth"
+  fi
+}
+
 assert_file_exists() {
   local file_path="$1"
   if [[ ! -f "$file_path" ]]; then
@@ -142,6 +204,12 @@ run_cls_experiment() {
     return
   fi
 
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_cls_eval_complete "$eval_dir"; then
+    log "[SKIP][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+    touch "$done_marker"
+    return
+  fi
+
   mkdir -p "$train_dir" "$eval_dir"
 
   local train_args=(
@@ -169,19 +237,28 @@ run_cls_experiment() {
     train_args+=(--fine-tune -lr "$CLS_FT_HEAD_LR" --backbone-lr "$CLS_FT_BACKBONE_LR")
   fi
 
-  log "[RUN][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks}"
-  run_logged "$train_log" "${train_args[@]}"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_cls_train_complete "$train_dir"; then
+    log "[SKIP][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks} (train checkpoint exists)"
+  else
+    log "[RUN][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks}"
+    run_logged "$train_log" "${train_args[@]}"
+  fi
 
-  local ckpt_path="${train_dir}/best_model.pth"
+  local ckpt_path
+  ckpt_path="$(select_cls_ckpt "$train_dir")"
   assert_file_exists "$ckpt_path"
 
-  run_logged "$eval_log" \
-    python eval_classifier.py \
-    --weights "$ckpt_path" \
-    --input "$CLS_TEST_DIR" \
-    --config "$CLS_CONFIG" \
-    --model-name "$MODEL_NAME" \
-    --out-dir "$eval_dir"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_cls_eval_complete "$eval_dir"; then
+    log "[SKIP][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+  else
+    run_logged "$eval_log" \
+      python eval_classifier.py \
+      --weights "$ckpt_path" \
+      --input "$CLS_TEST_DIR" \
+      --config "$CLS_CONFIG" \
+      --model-name "$MODEL_NAME" \
+      --out-dir "$eval_dir"
+  fi
 
   touch "$done_marker"
 }
@@ -202,6 +279,12 @@ run_ret_experiment() {
 
   if [[ "$SKIP_EXISTING" == "1" && -f "$done_marker" ]]; then
     log "[SKIP][RET] ${pretrain_label} unfreeze=${unfreeze_blocks} (already done)"
+    return
+  fi
+
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_ret_eval_complete "$eval_dir"; then
+    log "[SKIP][RET] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+    touch "$done_marker"
     return
   fi
 
@@ -233,21 +316,30 @@ run_ret_experiment() {
     train_args+=(--fine-tune --lr "$RET_FT_HEAD_LR" --backbone-lr "$RET_FT_BACKBONE_LR")
   fi
 
-  log "[RUN][RET] ${pretrain_label} unfreeze=${unfreeze_blocks}"
-  run_logged "$train_log" "${train_args[@]}"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_ret_train_complete "$train_dir"; then
+    log "[SKIP][RET] ${pretrain_label} unfreeze=${unfreeze_blocks} (train checkpoint exists)"
+  else
+    log "[RUN][RET] ${pretrain_label} unfreeze=${unfreeze_blocks}"
+    run_logged "$train_log" "${train_args[@]}"
+  fi
 
-  local ckpt_path="${train_dir}/best_model.pth"
+  local ckpt_path
+  ckpt_path="$(select_ret_ckpt "$train_dir")"
   assert_file_exists "$ckpt_path"
 
-  run_logged "$eval_log" \
-    python eval_retrieval.py \
-    --input "$RET_TEST_DIR" \
-    --config "$RET_CONFIG" \
-    --model-name "$MODEL_NAME" \
-    --repo-dir dinov3 \
-    --weights "$ckpt_path" \
-    --proj-dim "$RET_PROJ_DIM" \
-    --out-dir "$eval_dir"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_ret_eval_complete "$eval_dir"; then
+    log "[SKIP][RET] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+  else
+    run_logged "$eval_log" \
+      python eval_retrieval.py \
+      --input "$RET_TEST_DIR" \
+      --config "$RET_CONFIG" \
+      --model-name "$MODEL_NAME" \
+      --repo-dir dinov3 \
+      --weights "$ckpt_path" \
+      --proj-dim "$RET_PROJ_DIM" \
+      --out-dir "$eval_dir"
+  fi
 
   touch "$done_marker"
 }
@@ -268,6 +360,12 @@ run_seg_experiment() {
 
   if [[ "$SKIP_EXISTING" == "1" && -f "$done_marker" ]]; then
     log "[SKIP][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks} (already done)"
+    return
+  fi
+
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_seg_eval_complete "$eval_dir"; then
+    log "[SKIP][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+    touch "$done_marker"
     return
   fi
 
@@ -301,23 +399,32 @@ run_seg_experiment() {
     train_args+=(--fine-tune --lr "$SEG_FT_HEAD_LR" --backbone-lr "$SEG_FT_BACKBONE_LR")
   fi
 
-  log "[RUN][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks}"
-  run_logged "$train_log" "${train_args[@]}"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_seg_train_complete "$train_dir"; then
+    log "[SKIP][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks} (train checkpoint exists)"
+  else
+    log "[RUN][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks}"
+    run_logged "$train_log" "${train_args[@]}"
+  fi
 
-  local ckpt_path="${train_dir}/${SEG_BEST_CHECKPOINT}"
+  local ckpt_path
+  ckpt_path="$(select_seg_ckpt "$train_dir")"
   assert_file_exists "$ckpt_path"
 
-  run_logged "$eval_log" \
-    python eval_segmentation.py \
-    --eval-images "$SEG_TEST_IMAGES" \
-    --eval-masks "$SEG_TEST_MASKS" \
-    --config "$SEG_CONFIG" \
-    --weights "$ckpt_path" \
-    --out-dir "$eval_dir" \
-    --imgsz "$SEG_IMG_W" "$SEG_IMG_H" \
-    --batch "$SEG_EVAL_BATCH_SIZE" \
-    --num-workers "$SEG_NUM_WORKERS" \
-    --model-name "$MODEL_NAME"
+  if [[ "$SKIP_EXISTING" == "1" ]] && is_seg_eval_complete "$eval_dir"; then
+    log "[SKIP][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
+  else
+    run_logged "$eval_log" \
+      python eval_segmentation.py \
+      --eval-images "$SEG_TEST_IMAGES" \
+      --eval-masks "$SEG_TEST_MASKS" \
+      --config "$SEG_CONFIG" \
+      --weights "$ckpt_path" \
+      --out-dir "$eval_dir" \
+      --imgsz "$SEG_IMG_W" "$SEG_IMG_H" \
+      --batch "$SEG_EVAL_BATCH_SIZE" \
+      --num-workers "$SEG_NUM_WORKERS" \
+      --model-name "$MODEL_NAME"
+  fi
 
   touch "$done_marker"
 }
