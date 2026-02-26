@@ -2,6 +2,7 @@
 set -euo pipefail
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
@@ -11,6 +12,7 @@ REPO_DIR="${REPO_DIR:-dinov3}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-outputs/5_lora_tradeoff}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 SMOKE_TEST="${SMOKE_TEST:-0}"
+ETA_HEARTBEAT_SEC="${ETA_HEARTBEAT_SEC:-60}"
 
 UNFREEZE_BLOCKS_STR="${UNFREEZE_BLOCKS_STR:-0 2 4 12}"
 read -r -a UNFREEZE_BLOCKS <<<"$UNFREEZE_BLOCKS_STR"
@@ -124,7 +126,44 @@ run_with_eta() {
   step_start_ts="$(date +%s)"
 
   log "[RUN $((RUNS_DONE + 1))/${RUNS_TOTAL}] START ${label}"
-  "$@"
+  "$@" &
+  local run_pid=$!
+
+  local next_heartbeat_ts=$((step_start_ts + ETA_HEARTBEAT_SEC))
+  while kill -0 "$run_pid" 2>/dev/null; do
+    local now_ts
+    now_ts="$(date +%s)"
+    if (( now_ts >= next_heartbeat_ts )); then
+      local step_elapsed=$((now_ts - step_start_ts))
+      local remaining_runs_after_current=$((RUNS_TOTAL - RUNS_DONE - 1))
+
+      if (( RUNS_DONE > 0 )); then
+        local avg_per_done=$((RUNS_ELAPSED_SUM / RUNS_DONE))
+        local remaining_current_est=$((avg_per_done - step_elapsed))
+        if (( remaining_current_est < 0 )); then
+          remaining_current_est=0
+        fi
+        local remaining_est=$((remaining_current_est + avg_per_done * remaining_runs_after_current))
+        local eta_ts=$((now_ts + remaining_est))
+        local eta_str
+        eta_str="$(date -d "@${eta_ts}" '+%Y-%m-%d %H:%M:%S')"
+        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | avg/run=$(format_seconds "$avg_per_done")"
+      else
+        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | waiting for first completed run to calibrate ETA"
+      fi
+      next_heartbeat_ts=$((now_ts + ETA_HEARTBEAT_SEC))
+    fi
+    sleep 1
+  done
+
+  set +e
+  wait "$run_pid"
+  local run_rc=$?
+  set -e
+  if (( run_rc != 0 )); then
+    log "[RUN $((RUNS_DONE + 1))/${RUNS_TOTAL}] FAIL ${label} | exit_code=${run_rc}"
+    return "$run_rc"
+  fi
 
   local step_end_ts
   step_end_ts="$(date +%s)"
@@ -148,7 +187,7 @@ run_logged() {
   local log_file="$1"
   shift
   mkdir -p "$(dirname "$log_file")"
-  stdbuf -oL -eL "$@" 2>&1 | tee -a "$log_file"
+  PYTHONUNBUFFERED=1 stdbuf -oL -eL "$@" 2>&1 | tee -a "$log_file"
 }
 
 has_glob_match() {
