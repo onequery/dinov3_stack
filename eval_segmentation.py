@@ -129,6 +129,28 @@ def normalize_state_dict_keys(state_dict: dict) -> dict:
     return state_dict
 
 
+def infer_decoder_hidden_channels(state_dict: dict) -> int:
+    key = "decode_head.decode.0.weight"
+    if key not in state_dict:
+        raise ValueError(f"Cannot infer decoder hidden channels: missing key `{key}`")
+    weight = state_dict[key]
+    if weight.ndim != 4:
+        raise ValueError(f"Unexpected tensor shape for `{key}`: {tuple(weight.shape)}")
+    return int(weight.shape[0])
+
+
+def infer_lora_rank(state_dict: dict) -> int | None:
+    ranks = set()
+    for key, value in state_dict.items():
+        if key.startswith("backbone_model.") and key.endswith(".lora_A"):
+            ranks.add(int(value.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) != 1:
+        raise ValueError(f"Multiple LoRA ranks detected in checkpoint: {sorted(ranks)}")
+    return list(ranks)[0]
+
+
 def resolve_repo_path(repo_dir_arg: str | None, env_repo_dir: str | None) -> str:
     if repo_dir_arg:
         repo_path = os.path.abspath(os.path.expanduser(repo_dir_arg))
@@ -267,17 +289,29 @@ def main():
         num_workers=args.num_workers,
     )
 
+    state_dict = normalize_state_dict_keys(load_checkpoint(checkpoint_path, device))
+    decoder_hidden_channels = infer_decoder_hidden_channels(state_dict)
+    lora_rank = infer_lora_rank(state_dict)
+    print(
+        "Inferred segmentation config | "
+        f"decoder_hidden_channels={decoder_hidden_channels} "
+        f"| lora_rank={lora_rank if lora_rank is not None else 'none'}"
+    )
+
     # Build model
     model = Dinov3Segmentation(
         fine_tune=False,
         num_classes=len(all_classes),
+        decoder_hidden_channels=decoder_hidden_channels,
+        enable_lora=(lora_rank is not None),
+        lora_rank=lora_rank,
+        lora_alpha=lora_rank,
+        lora_target="attn_qkv_proj",
         weights=checkpoint_path,
         model_name=args.model_name,
         repo_dir=repo_dir,
         feature_extractor=args.feature_extractor,
     ).to(device)
-
-    state_dict = normalize_state_dict_keys(load_checkpoint(checkpoint_path, device))
 
     if not any(key.startswith("backbone_model.") for key in state_dict.keys()):
         raise RuntimeError(

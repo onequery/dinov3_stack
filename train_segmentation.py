@@ -1,6 +1,7 @@
 import torch
 import os
 import argparse
+import json
 import torch.nn as nn
 import yaml
 import numpy as np
@@ -11,6 +12,7 @@ from src.img_seg.datasets import get_images, get_dataset, get_data_loaders
 from src.img_seg.model import Dinov3Segmentation
 from src.img_seg.engine import train, validate
 from src.img_seg.utils import save_model, SaveBestModel, save_plots, SaveBestModelIOU
+from src.utils.lora import count_lora_params
 from src.utils.common import get_dinov3_paths
 from torch.optim.lr_scheduler import MultiStepLR
 from torchinfo import summary
@@ -131,6 +133,60 @@ parser.add_argument(
 )
 parser.add_argument("--fine-tune", dest="fine_tune", action="store_true")
 parser.add_argument(
+    "--head-size",
+    dest="head_size",
+    choices=["small", "big"],
+    default="small",
+    help="segmentation head size (controls default decoder channels)",
+)
+parser.add_argument(
+    "--decoder-hidden-channels",
+    dest="decoder_hidden_channels",
+    default=None,
+    type=int,
+    help="hidden channels for segmentation decoder head",
+)
+parser.add_argument(
+    "--enable-lora",
+    dest="enable_lora",
+    action="store_true",
+    help="enable LoRA injection on ViT attention qkv/proj",
+)
+parser.add_argument(
+    "--lora-rank",
+    dest="lora_rank",
+    type=int,
+    default=None,
+    help="LoRA rank",
+)
+parser.add_argument(
+    "--lora-alpha",
+    dest="lora_alpha",
+    type=int,
+    default=None,
+    help="LoRA alpha (default: rank)",
+)
+parser.add_argument(
+    "--lora-dropout",
+    dest="lora_dropout",
+    type=float,
+    default=0.0,
+    help="LoRA dropout",
+)
+parser.add_argument(
+    "--lora-target",
+    dest="lora_target",
+    choices=["attn_qkv_proj"],
+    default="attn_qkv_proj",
+    help="LoRA injection target",
+)
+parser.add_argument(
+    "--save-config-json",
+    dest="save_config_json",
+    default=None,
+    help="optional output path for resolved run config json",
+)
+parser.add_argument(
     "--unfreeze-blocks",
     dest="unfreeze_blocks",
     default=None,
@@ -156,6 +212,10 @@ if not args.fine_tune and args.unfreeze_blocks not in (None, 0):
         "--unfreeze-blocks > 0 requires --fine-tune. "
         "For linear probe, use --unfreeze-blocks 0 without --fine-tune."
     )
+if args.enable_lora and (args.lora_rank is None or args.lora_rank <= 0):
+    raise ValueError("--enable-lora requires --lora-rank > 0")
+if args.decoder_hidden_channels is not None and args.decoder_hidden_channels <= 0:
+    raise ValueError("--decoder-hidden-channels must be > 0")
 
 
 def resolve_repo_path(repo_dir_arg, env_repo_dir):
@@ -228,6 +288,16 @@ if __name__ == "__main__":
         fine_tune=args.fine_tune,
         unfreeze_last_n_blocks=args.unfreeze_blocks,
         num_classes=len(ALL_CLASSES),
+        decoder_hidden_channels=(
+            args.decoder_hidden_channels
+            if args.decoder_hidden_channels is not None
+            else (256 if args.head_size == "small" else 512)
+        ),
+        enable_lora=args.enable_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        lora_target=args.lora_target,
         weights=weights_path,
         model_name=args.model_name,
         repo_dir=repo_dir,
@@ -235,6 +305,34 @@ if __name__ == "__main__":
     )
     _ = model.to(device)
     log_with_time(f"Backbone trainability: {model.backbone_trainability}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    lora_params = count_lora_params(model)
+    log_with_time(f"{total_params:,} total parameters.")
+    log_with_time(f"{trainable_params:,} training parameters.")
+    log_with_time(f"{lora_params:,} LoRA parameters.")
+    param_stats = {
+        "total_params": int(total_params),
+        "trainable_params": int(trainable_params),
+        "lora_params": int(lora_params),
+        "head_info": getattr(model, "head_info", {}),
+        "backbone_trainability": getattr(model, "backbone_trainability", {}),
+        "lora_info": getattr(model, "lora_info", None),
+    }
+    with open(os.path.join(out_dir, "param_stats.json"), "w") as f:
+        json.dump(param_stats, f, indent=2)
+    run_config = {
+        "args": vars(args),
+        "resolved": {
+            "repo_dir": repo_dir,
+            "weights_path": weights_path,
+            "device": str(device),
+            "out_dir": out_dir,
+        },
+    }
+    run_config_path = args.save_config_json or os.path.join(out_dir, "run_config.json")
+    with open(run_config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
     summary(
         model,
         (1, 3, 448, 448),

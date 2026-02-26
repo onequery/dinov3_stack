@@ -23,6 +23,7 @@ from sklearn.metrics import average_precision_score
 from tqdm import tqdm
 
 from train_retrieval import load_backbone_from_local_checkpoint
+from src.utils.lora import inject_lora_into_vit
 
 
 # -----------------------------
@@ -61,14 +62,20 @@ class Dinov3Retrieval(nn.Module):
         backbone: nn.Module,
         backbone_embed_dim: int,
         retrieval_embedding_dim: int = 128,
+        projector_hidden_dim: int | None = None,
     ):
         super().__init__()
         self.backbone = backbone
+        hidden_dim = (
+            int(projector_hidden_dim)
+            if projector_hidden_dim is not None
+            else int(backbone_embed_dim)
+        )
         self.projector = nn.Sequential(
-            nn.Linear(backbone_embed_dim, backbone_embed_dim),
-            nn.BatchNorm1d(backbone_embed_dim),
+            nn.Linear(backbone_embed_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
-            nn.Linear(backbone_embed_dim, retrieval_embedding_dim),
+            nn.Linear(hidden_dim, retrieval_embedding_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -84,6 +91,25 @@ class BackboneRetrieval(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return l2_normalize(self.backbone(x))
+
+
+def infer_projector_hidden_dim(state_dict: Dict[str, torch.Tensor]) -> int:
+    key = "projector.0.weight"
+    if key not in state_dict:
+        raise ValueError(f"Cannot infer projector hidden dim: missing key `{key}`")
+    return int(state_dict[key].shape[0])
+
+
+def infer_lora_rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int | None:
+    ranks = set()
+    for key, value in state_dict.items():
+        if key.startswith("backbone.") and key.endswith(".lora_A"):
+            ranks.add(int(value.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) != 1:
+        raise ValueError(f"Multiple LoRA ranks detected in checkpoint: {sorted(ranks)}")
+    return list(ranks)[0]
 
 
 def load_retrieval_model(
@@ -113,22 +139,34 @@ def load_retrieval_model(
     has_projector_prefix = any(k.startswith("projector.") for k in state_dict.keys())
 
     if has_backbone_prefix and has_projector_prefix:
+        lora_rank = infer_lora_rank_from_state_dict(state_dict)
         backbone, load_report = load_backbone_from_local_checkpoint(
             repo_dir=repo_dir,
             model_name=model_name,
             weights_path=weights_path,
             device="cpu",
         )
+        if lora_rank is not None:
+            inject_lora_into_vit(
+                backbone=backbone,
+                target="attn_qkv_proj",
+                rank=lora_rank,
+                alpha=lora_rank,
+                dropout=0.0,
+                preserve_base_trainability=True,
+            )
         backbone_embed_dim = backbone.norm.normalized_shape[0]
+        projector_hidden_dim = infer_projector_hidden_dim(state_dict)
         model = Dinov3Retrieval(
             backbone,
             backbone_embed_dim=backbone_embed_dim,
             retrieval_embedding_dim=proj_dim,
+            projector_hidden_dim=projector_hidden_dim,
         )
         model.load_state_dict(state_dict, strict=True)
         return (
             model,
-            f"retrieval_with_projector:{load_report['builder']}",
+            f"retrieval_with_projector:{load_report['builder']}:lora_rank={lora_rank if lora_rank is not None else 'none'}",
             backbone_embed_dim,
         )
 

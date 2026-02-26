@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import yaml
 
+from src.utils.lora import count_lora_params, inject_lora_into_vit
 from src.utils.common import configure_backbone_trainability
 
 
@@ -78,6 +79,18 @@ def _extract_backbone_state_dict(
             return stripped, "prefix:module."
 
     return state_dict, "raw"
+
+
+def _normalize_backbone_state_dict_for_lora(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if ".lora_A" in key or ".lora_B" in key:
+            continue
+        new_key = key.replace(".base_layer.", ".")
+        normalized[new_key] = value
+    return normalized
 
 
 def _find_pretrain_config(weights_path: str) -> str | None:
@@ -212,6 +225,7 @@ def _load_backbone_from_checkpoint(
         )
 
     candidate_state_dict, state_source = _extract_backbone_state_dict(raw_state_dict)
+    candidate_state_dict = _normalize_backbone_state_dict_for_lora(candidate_state_dict)
 
     config_path, cfg = _load_pretrain_config(weights_path)
     model_kwargs = _build_model_kwargs_from_cfg(cfg) if cfg else {}
@@ -385,6 +399,13 @@ class Dinov3Classification(nn.Module):
         fine_tune: bool = False,
         unfreeze_last_n_blocks: int | None = None,
         num_classes: int = 2,
+        head_size: str = "small",
+        head_hidden_dim: int | None = None,
+        enable_lora: bool = False,
+        lora_rank: int | None = None,
+        lora_alpha: int | None = None,
+        lora_dropout: float = 0.0,
+        lora_target: str = "attn_qkv_proj",
         weights: str | None = None,
         model_name: str | None = None,
         repo_dir: str | None = None,
@@ -394,18 +415,48 @@ class Dinov3Classification(nn.Module):
         self.backbone_model = load_model(
             weights=weights, model_name=model_name, repo_dir=repo_dir
         )
+        embed_dim = self.backbone_model.norm.normalized_shape[0]
 
-        self.head = nn.Linear(
-            in_features=self.backbone_model.norm.normalized_shape[0],
-            out_features=num_classes,
-            bias=True,
-        )
+        if head_size not in {"small", "big"}:
+            raise ValueError(f"Unsupported head_size={head_size}")
+        if head_size == "small":
+            self.head = nn.Linear(
+                in_features=embed_dim,
+                out_features=num_classes,
+                bias=True,
+            )
+        else:
+            hidden_dim = int(head_hidden_dim if head_hidden_dim is not None else embed_dim * 2)
+            self.head = nn.Sequential(
+                nn.Linear(embed_dim, hidden_dim, bias=True),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, num_classes, bias=True),
+            )
+        self.head_info = {
+            "head_size": head_size,
+            "head_hidden_dim": (
+                None if head_size == "small" else int(head_hidden_dim if head_hidden_dim is not None else embed_dim * 2)
+            ),
+        }
 
         self.backbone_trainability = configure_backbone_trainability(
             self.backbone_model,
             fine_tune=fine_tune,
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
         )
+        self.lora_info = None
+        if enable_lora:
+            if lora_rank is None:
+                raise ValueError("LoRA is enabled but lora_rank is not set.")
+            self.lora_info = inject_lora_into_vit(
+                backbone=self.backbone_model,
+                target=lora_target,
+                rank=int(lora_rank),
+                alpha=lora_alpha,
+                dropout=float(lora_dropout),
+                preserve_base_trainability=True,
+            )
+            self.lora_info["lora_params"] = count_lora_params(self.backbone_model)
 
     def forward(self, x):
         features = self.backbone_model(x)

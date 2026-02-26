@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 from torchinfo import summary
+from src.utils.lora import count_lora_params, inject_lora_into_vit
 from src.utils.common import configure_backbone_trainability
 
 model_feature_layers = {
@@ -82,6 +83,18 @@ def _extract_backbone_state_dict(
             return stripped, "prefix:module."
 
     return state_dict, "raw"
+
+
+def _normalize_backbone_state_dict_for_lora(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if ".lora_A" in key or ".lora_B" in key:
+            continue
+        new_key = key.replace(".base_layer.", ".")
+        normalized[new_key] = value
+    return normalized
 
 
 def _find_pretrain_config(weights_path: str) -> str | None:
@@ -227,6 +240,7 @@ def _load_backbone_from_checkpoint(repo_dir: str, model_name: str, weights_path:
         )
 
     candidate_state_dict, state_source = _extract_backbone_state_dict(raw_state_dict)
+    candidate_state_dict = _normalize_backbone_state_dict_for_lora(candidate_state_dict)
 
     config_path, cfg = _load_pretrain_config(weights_path)
     model_kwargs = _build_model_kwargs_from_cfg(cfg) if cfg else {}
@@ -379,12 +393,12 @@ def load_model(weights: str = None, model_name: str = None, repo_dir: str = None
 
 
 class SimpleDecoder(nn.Module):
-    def __init__(self, in_channels, nc=1):
+    def __init__(self, in_channels, nc=1, hidden_channels=256):
         super().__init__()
         self.decode = nn.Sequential(
-            nn.Conv2d(in_channels, 256, 3, padding=1),
+            nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, nc, kernel_size=1),
+            nn.Conv2d(hidden_channels, nc, kernel_size=1),
         )
 
     def forward(self, x):
@@ -397,6 +411,12 @@ class Dinov3Segmentation(nn.Module):
         fine_tune: bool = False,
         unfreeze_last_n_blocks: int | None = None,
         num_classes: int = 2,
+        decoder_hidden_channels: int = 256,
+        enable_lora: bool = False,
+        lora_rank: int | None = None,
+        lora_alpha: int | None = None,
+        lora_dropout: float = 0.0,
+        lora_target: str = "attn_qkv_proj",
         weights: str = None,
         model_name: str = None,
         repo_dir: str = None,
@@ -416,6 +436,19 @@ class Dinov3Segmentation(nn.Module):
             fine_tune=fine_tune,
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
         )
+        self.lora_info = None
+        if enable_lora:
+            if lora_rank is None:
+                raise ValueError("LoRA is enabled but lora_rank is not set.")
+            self.lora_info = inject_lora_into_vit(
+                backbone=self.backbone_model,
+                target=lora_target,
+                rank=int(lora_rank),
+                alpha=lora_alpha,
+                dropout=float(lora_dropout),
+                preserve_base_trainability=True,
+            )
+            self.lora_info["lora_params"] = count_lora_params(self.backbone_model)
 
         self.feature_extractor_layers = (
             1 if feature_extractor == "last" else model_feature_layers[self.model_name]
@@ -427,8 +460,14 @@ class Dinov3Segmentation(nn.Module):
         )
 
         self.decode_head = SimpleDecoder(
-            in_channels=decode_head_in_channels, nc=self.num_classes
+            in_channels=decode_head_in_channels,
+            nc=self.num_classes,
+            hidden_channels=int(decoder_hidden_channels),
         )
+        self.head_info = {
+            "head_size": "small" if int(decoder_hidden_channels) == 256 else "big",
+            "decoder_hidden_channels": int(decoder_hidden_channels),
+        }
 
     def forward(self, x):
         # Backbone forward pass

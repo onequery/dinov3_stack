@@ -34,6 +34,22 @@ from src.utils.common import get_dinov3_paths
 # --------------------------------------------------
 # Utility
 # --------------------------------------------------
+def resolve_repo_path(repo_dir_arg, env_repo_dir):
+    if repo_dir_arg:
+        repo_path = os.path.abspath(os.path.expanduser(repo_dir_arg))
+        if not os.path.exists(repo_path):
+            raise FileNotFoundError(f"DINOv3 repository not found at: {repo_path}")
+        return repo_path
+
+    if not env_repo_dir:
+        raise ValueError(
+            "DINOv3 repository path is missing. "
+            "Set DINOV3_REPO in .env or pass --repo-dir."
+        )
+
+    return env_repo_dir
+
+
 def collect_image_paths(root_dir, exts=("png", "jpg", "jpeg")):
     image_paths = []
     for ext in exts:
@@ -240,6 +256,47 @@ def plot_simplex_3class(df, softmax_arr, class_names, out_path):
     plt.close()
 
 
+def infer_head_config_from_state_dict(state_dict):
+    if "head.weight" in state_dict and "head.bias" in state_dict:
+        return {"head_size": "small", "head_hidden_dim": None}
+
+    if (
+        "head.0.weight" in state_dict
+        and "head.0.bias" in state_dict
+        and "head.2.weight" in state_dict
+        and "head.2.bias" in state_dict
+    ):
+        hidden_dim = int(state_dict["head.0.weight"].shape[0])
+        return {"head_size": "big", "head_hidden_dim": hidden_dim}
+
+    raise ValueError(
+        "Cannot infer classification head type from checkpoint keys. "
+        "Expected either small head (`head.weight`) or big head (`head.0.weight`, `head.2.weight`)."
+    )
+
+
+def infer_lora_rank_from_state_dict(state_dict):
+    ranks = set()
+    for key, value in state_dict.items():
+        if key.startswith("backbone_model.") and key.endswith(".lora_A"):
+            ranks.add(int(value.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) != 1:
+        raise ValueError(f"Multiple LoRA ranks detected in checkpoint: {sorted(ranks)}")
+    return list(ranks)[0]
+
+
+def normalize_state_dict_keys(state_dict):
+    if any(key.startswith("module.") for key in state_dict.keys()):
+        return {
+            key[len("module.") :]: value
+            for key, value in state_dict.items()
+            if key.startswith("module.")
+        }
+    return state_dict
+
+
 # --------------------------------------------------
 # Args
 # --------------------------------------------------
@@ -249,6 +306,7 @@ parser.add_argument("--input", required=True)
 parser.add_argument("--config", required=True)
 parser.add_argument("--model-name", default="dinov3_vits16")
 parser.add_argument("--out-dir", default="outputs/eval_results")
+parser.add_argument("--repo-dir", default=None)
 args = parser.parse_args()
 
 
@@ -256,7 +314,11 @@ args = parser.parse_args()
 # Env
 # --------------------------------------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DINOV3_REPO, _ = get_dinov3_paths()
+DINOV3_REPO, _ = get_dinov3_paths(
+    require_repo=not bool(args.repo_dir),
+    require_weights=False,
+)
+DINOV3_REPO = resolve_repo_path(args.repo_dir, DINOV3_REPO)
 
 
 # --------------------------------------------------
@@ -306,9 +368,21 @@ if not isinstance(model_state_dict, dict):
     raise ValueError(
         "Invalid `model_state_dict` in checkpoint. Expected a dictionary of tensors."
     )
+model_state_dict = normalize_state_dict_keys(model_state_dict)
+head_cfg = infer_head_config_from_state_dict(model_state_dict)
+print(f"Inferred head config: {head_cfg}")
+lora_rank = infer_lora_rank_from_state_dict(model_state_dict)
+if lora_rank is not None:
+    print(f"Inferred LoRA config: target=attn_qkv_proj rank={lora_rank}")
 
 model = Dinov3Classification(
     num_classes=len(CLASS_NAMES),
+    head_size=head_cfg["head_size"],
+    head_hidden_dim=head_cfg["head_hidden_dim"],
+    enable_lora=(lora_rank is not None),
+    lora_rank=lora_rank,
+    lora_alpha=lora_rank,
+    lora_target="attn_qkv_proj",
     weights=args.weights,
     model_name=args.model_name,
     repo_dir=DINOV3_REPO,

@@ -5,6 +5,7 @@ Train Retrieval Model with Projection Head on DINOv3 Backbone
 """
 
 import argparse
+import json
 import os
 import random
 import re
@@ -26,6 +27,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from src.utils.common import configure_backbone_trainability, get_dinov3_paths
+from src.utils.lora import count_lora_params, inject_lora_into_vit
 
 # -------------------------
 # Reproducibility
@@ -101,6 +103,18 @@ def _extract_backbone_state_dict(
             return stripped, "prefix:module."
 
     return state_dict, "raw"
+
+
+def _normalize_backbone_state_dict_for_lora(
+    state_dict: Dict[str, torch.Tensor],
+) -> Dict[str, torch.Tensor]:
+    normalized: Dict[str, torch.Tensor] = {}
+    for key, value in state_dict.items():
+        if ".lora_A" in key or ".lora_B" in key:
+            continue
+        new_key = key.replace(".base_layer.", ".")
+        normalized[new_key] = value
+    return normalized
 
 
 def _find_pretrain_config(weights_path: str) -> str | None:
@@ -192,6 +206,7 @@ def load_backbone_from_local_checkpoint(
         )
 
     candidate_state_dict, state_source = _extract_backbone_state_dict(raw_state_dict)
+    candidate_state_dict = _normalize_backbone_state_dict_for_lora(candidate_state_dict)
 
     config_path, cfg = _load_pretrain_config(weights_path)
     model_kwargs = _build_model_kwargs_from_cfg(cfg) if cfg else {}
@@ -421,22 +436,55 @@ class Dinov3Retrieval(nn.Module):
         retrieval_embedding_dim=128,
         fine_tune=False,
         unfreeze_last_n_blocks=None,
+        head_size="small",
+        head_hidden_dim=None,
+        enable_lora=False,
+        lora_rank=None,
+        lora_alpha=None,
+        lora_dropout=0.0,
+        lora_target="attn_qkv_proj",
     ):
         super().__init__()
         self.backbone = backbone
-
-        self.projector = nn.Sequential(
-            nn.Linear(backbone_embed_dim, backbone_embed_dim),
-            nn.BatchNorm1d(backbone_embed_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(backbone_embed_dim, retrieval_embedding_dim),
-        )
 
         self.backbone_trainability = configure_backbone_trainability(
             self.backbone,
             fine_tune=fine_tune,
             unfreeze_last_n_blocks=unfreeze_last_n_blocks,
         )
+        self.lora_info = None
+        if enable_lora:
+            if lora_rank is None:
+                raise ValueError("LoRA is enabled but lora_rank is not set.")
+            self.lora_info = inject_lora_into_vit(
+                backbone=self.backbone,
+                target=lora_target,
+                rank=int(lora_rank),
+                alpha=lora_alpha,
+                dropout=float(lora_dropout),
+                preserve_base_trainability=True,
+            )
+            self.lora_info["lora_params"] = count_lora_params(self.backbone)
+
+        if head_size not in {"small", "big"}:
+            raise ValueError(f"Unsupported head_size={head_size}")
+        if head_size == "small":
+            projector_hidden_dim = int(backbone_embed_dim)
+        else:
+            if head_hidden_dim is None or int(head_hidden_dim) <= 0:
+                raise ValueError("--head-size big requires --head-hidden-dim > 0")
+            projector_hidden_dim = int(head_hidden_dim)
+
+        self.projector = nn.Sequential(
+            nn.Linear(backbone_embed_dim, projector_hidden_dim),
+            nn.BatchNorm1d(projector_hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(projector_hidden_dim, retrieval_embedding_dim),
+        )
+        self.head_info = {
+            "head_size": head_size,
+            "head_hidden_dim": projector_hidden_dim,
+        }
 
     def forward(self, x):
         feat = self.backbone(x)
@@ -586,7 +634,43 @@ def main():
         help="learning rate for backbone parameters during full fine-tuning",
     )
     parser.add_argument("--proj-dim", type=int, default=128)
+    parser.add_argument(
+        "--head-size",
+        choices=["small", "big"],
+        default="small",
+        help="retrieval head/projector size",
+    )
+    parser.add_argument(
+        "--head-hidden-dim",
+        type=int,
+        default=None,
+        help="hidden dim for big retrieval projector",
+    )
     parser.add_argument("--fine-tune", action="store_true")
+    parser.add_argument(
+        "--enable-lora",
+        action="store_true",
+        help="enable LoRA injection on ViT attention qkv/proj",
+    )
+    parser.add_argument("--lora-rank", type=int, default=None, help="LoRA rank")
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=None,
+        help="LoRA alpha (default: rank)",
+    )
+    parser.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=0.0,
+        help="LoRA dropout",
+    )
+    parser.add_argument(
+        "--lora-target",
+        choices=["attn_qkv_proj"],
+        default="attn_qkv_proj",
+        help="LoRA injection target",
+    )
     parser.add_argument(
         "--unfreeze-blocks",
         type=int,
@@ -633,6 +717,12 @@ def main():
         help="path to the cloned DINOv3 repository",
     )
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--save-config-json",
+        dest="save_config_json",
+        default=None,
+        help="optional output path for resolved run config json",
+    )
     args = parser.parse_args()
     if args.unfreeze_blocks is not None and args.unfreeze_blocks < 0:
         raise ValueError("--unfreeze-blocks must be >= 0")
@@ -641,6 +731,10 @@ def main():
             "--unfreeze-blocks > 0 requires --fine-tune. "
             "For linear probe, use --unfreeze-blocks 0 without --fine-tune."
         )
+    if args.enable_lora and (args.lora_rank is None or args.lora_rank <= 0):
+        raise ValueError("--enable-lora requires --lora-rank > 0")
+    if args.head_size == "big" and (args.head_hidden_dim is None or args.head_hidden_dim <= 0):
+        raise ValueError("--head-size big requires --head-hidden-dim > 0")
 
     os.makedirs(args.out_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -696,9 +790,19 @@ def main():
         retrieval_embedding_dim=args.proj_dim,
         fine_tune=args.fine_tune,
         unfreeze_last_n_blocks=args.unfreeze_blocks,
+        head_size=args.head_size,
+        head_hidden_dim=args.head_hidden_dim,
+        enable_lora=args.enable_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        lora_target=args.lora_target,
     ).to(
         device
     )
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    lora_params = count_lora_params(model)
 
     criterion = SupConLoss()
     if args.fine_tune and args.backbone_lr is not None:
@@ -723,12 +827,20 @@ def main():
         f"| num_workers={args.num_workers} | lr={args.lr} "
         f"| backbone_lr={args.backbone_lr if args.backbone_lr is not None else 'default'} "
         f"| unfreeze_blocks={args.unfreeze_blocks if args.unfreeze_blocks is not None else 'full'} "
+        f"| head_size={args.head_size} "
+        f"| head_hidden_dim={args.head_hidden_dim if args.head_hidden_dim is not None else 'default'} "
+        f"| lora={args.enable_lora} "
+        f"| lora_rank={args.lora_rank if args.lora_rank is not None else 'none'} "
         f"| max_epochs={args.max_epochs} | early_stopping={args.early_stopping} "
         f"| weights={weights_path} "
         f"| monitor={args.early_stopping_monitor} "
         f"| patience={args.early_stopping_patience}"
     )
     print(f"[{start_ts}] Backbone trainability | {model.backbone_trainability}")
+    print(
+        f"[{start_ts}] Params | total={total_params:,} "
+        f"| trainable={trainable_params:,} | lora={lora_params:,}"
+    )
     print(
         f"[{start_ts}] Backbone load | source={load_report['state_source']} "
         f"| config={load_report['config_path'] if load_report['config_path'] else 'none'} "
@@ -740,6 +852,28 @@ def main():
         f"| missing={load_report['missing_after_load']} "
         f"| unexpected={load_report['unexpected_after_load']}"
     )
+    param_stats = {
+        "total_params": int(total_params),
+        "trainable_params": int(trainable_params),
+        "lora_params": int(lora_params),
+        "head_info": getattr(model, "head_info", {}),
+        "backbone_trainability": getattr(model, "backbone_trainability", {}),
+        "lora_info": getattr(model, "lora_info", None),
+    }
+    with open(os.path.join(args.out_dir, "param_stats.json"), "w") as f:
+        json.dump(param_stats, f, indent=2)
+    run_config = {
+        "args": vars(args),
+        "resolved": {
+            "repo_dir": dinov3_repo,
+            "weights_path": weights_path,
+            "device": device,
+            "out_dir": args.out_dir,
+        },
+    }
+    run_config_path = args.save_config_json or os.path.join(args.out_dir, "run_config.json")
+    with open(run_config_path, "w") as f:
+        json.dump(run_config, f, indent=2)
 
     train_losses, val_losses = [], []
     r1_list, r5_list = [], []
