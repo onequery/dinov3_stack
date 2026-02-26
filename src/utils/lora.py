@@ -40,6 +40,10 @@ class LoRALinear(nn.Module):
 
         in_features = self.base_layer.in_features
         out_features = self.base_layer.out_features
+        # Expose Linear-like metadata for compatibility with code that accesses
+        # qkv.in_features / out_features directly.
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
 
         self.lora_A = nn.Parameter(torch.empty(self.rank, in_features))
         self.lora_B = nn.Parameter(torch.empty(out_features, self.rank))
@@ -56,6 +60,25 @@ class LoRALinear(nn.Module):
 
     def lora_parameters(self) -> List[nn.Parameter]:
         return [self.lora_A, self.lora_B]
+
+    @property
+    def weight(self) -> nn.Parameter:
+        return self.base_layer.weight
+
+    @property
+    def bias(self) -> nn.Parameter | None:
+        return self.base_layer.bias
+
+    def __getattr__(self, name: str):
+        # Delegate unknown attributes to wrapped layer to preserve custom
+        # fields (e.g. LinearKMaskedBias.bias_mask) and improve drop-in behavior.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            base_layer = super().__getattr__("base_layer")
+            if hasattr(base_layer, name):
+                return getattr(base_layer, name)
+            raise
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.base_layer(x)
@@ -162,4 +185,3 @@ def collect_lora_params(module: nn.Module) -> List[nn.Parameter]:
 
 def count_lora_params(module: nn.Module) -> int:
     return int(sum(param.numel() for param in collect_lora_params(module)))
-
