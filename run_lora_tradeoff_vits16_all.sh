@@ -13,6 +13,7 @@ EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-outputs/5_lora_tradeoff}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 SMOKE_TEST="${SMOKE_TEST:-0}"
 ETA_HEARTBEAT_SEC="${ETA_HEARTBEAT_SEC:-60}"
+ETA_MIN_EXEC_SEC="${ETA_MIN_EXEC_SEC:-30}"
 
 UNFREEZE_BLOCKS_STR="${UNFREEZE_BLOCKS_STR:-0 2 4 12}"
 read -r -a UNFREEZE_BLOCKS <<<"$UNFREEZE_BLOCKS_STR"
@@ -102,6 +103,11 @@ BATCH_START_TS="$(date +%s)"
 RUNS_TOTAL=0
 RUNS_DONE=0
 RUNS_ELAPSED_SUM=0
+RUNS_EXEC_DONE=0
+RUNS_EXEC_ELAPSED_SUM=0
+RUNS_ETA_DONE=0
+RUNS_ETA_ELAPSED_SUM=0
+RUN_STEP_STATUS="unknown"
 
 format_seconds() {
   local seconds="$1"
@@ -124,6 +130,7 @@ run_with_eta() {
 
   local step_start_ts
   step_start_ts="$(date +%s)"
+  RUN_STEP_STATUS="unknown"
 
   log "[RUN $((RUNS_DONE + 1))/${RUNS_TOTAL}] START ${label}"
   "$@" &
@@ -137,19 +144,23 @@ run_with_eta() {
       local step_elapsed=$((now_ts - step_start_ts))
       local remaining_runs_after_current=$((RUNS_TOTAL - RUNS_DONE - 1))
 
-      if (( RUNS_DONE > 0 )); then
-        local avg_per_done=$((RUNS_ELAPSED_SUM / RUNS_DONE))
-        local remaining_current_est=$((avg_per_done - step_elapsed))
+      if (( RUNS_ETA_DONE > 0 )); then
+        local avg_eta_run=$((RUNS_ETA_ELAPSED_SUM / RUNS_ETA_DONE))
+        local remaining_current_est=$((avg_eta_run - step_elapsed))
         if (( remaining_current_est < 0 )); then
           remaining_current_est=0
         fi
-        local remaining_est=$((remaining_current_est + avg_per_done * remaining_runs_after_current))
+        local remaining_est=$((remaining_current_est + avg_eta_run * remaining_runs_after_current))
         local eta_ts=$((now_ts + remaining_est))
         local eta_str
         eta_str="$(date -d "@${eta_ts}" '+%Y-%m-%d %H:%M:%S')"
-        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | avg/run=$(format_seconds "$avg_per_done")"
+        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | avg_eta/run=$(format_seconds "$avg_eta_run")"
       else
-        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | waiting for first completed run to calibrate ETA"
+        local remaining_est=$((step_elapsed * remaining_runs_after_current))
+        local eta_ts=$((now_ts + remaining_est))
+        local eta_str
+        eta_str="$(date -d "@${eta_ts}" '+%Y-%m-%d %H:%M:%S')"
+        log "[ETA] ${label} running $(format_seconds "$step_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | provisional(current run only; avg_eta pending)"
       fi
       next_heartbeat_ts=$((now_ts + ETA_HEARTBEAT_SEC))
     fi
@@ -171,16 +182,43 @@ run_with_eta() {
 
   RUNS_DONE=$((RUNS_DONE + 1))
   RUNS_ELAPSED_SUM=$((RUNS_ELAPSED_SUM + step_elapsed))
+  if [[ "$RUN_STEP_STATUS" != "skipped" ]]; then
+    RUNS_EXEC_DONE=$((RUNS_EXEC_DONE + 1))
+    RUNS_EXEC_ELAPSED_SUM=$((RUNS_EXEC_ELAPSED_SUM + step_elapsed))
+    if (( step_elapsed >= ETA_MIN_EXEC_SEC )); then
+      RUNS_ETA_DONE=$((RUNS_ETA_DONE + 1))
+      RUNS_ETA_ELAPSED_SUM=$((RUNS_ETA_ELAPSED_SUM + step_elapsed))
+    fi
+  fi
 
   local total_elapsed=$((step_end_ts - BATCH_START_TS))
   local remaining_runs=$((RUNS_TOTAL - RUNS_DONE))
-  local avg_per_run=$((RUNS_ELAPSED_SUM / RUNS_DONE))
-  local remaining_est=$((avg_per_run * remaining_runs))
+  local avg_all=$((RUNS_ELAPSED_SUM / RUNS_DONE))
+  local avg_exec=0
+  local avg_eta=0
+  local remaining_est=0
+  local avg_label="provisional_from_last_run"
+  local avg_value="$step_elapsed"
+  if (( RUNS_EXEC_DONE > 0 )); then
+    avg_exec=$((RUNS_EXEC_ELAPSED_SUM / RUNS_EXEC_DONE))
+  fi
+  if (( RUNS_ETA_DONE > 0 )); then
+    avg_eta=$((RUNS_ETA_ELAPSED_SUM / RUNS_ETA_DONE))
+    remaining_est=$((avg_eta * remaining_runs))
+    avg_label="avg_eta"
+    avg_value="$avg_eta"
+  else
+    remaining_est=$((step_elapsed * remaining_runs))
+    if (( RUNS_EXEC_DONE > 0 )); then
+      avg_label="avg_exec_insufficient_for_eta"
+      avg_value="$avg_exec"
+    fi
+  fi
   local eta_ts=$((step_end_ts + remaining_est))
   local eta_str
   eta_str="$(date -d "@${eta_ts}" '+%Y-%m-%d %H:%M:%S')"
 
-  log "[RUN ${RUNS_DONE}/${RUNS_TOTAL}] DONE ${label} | took=$(format_seconds "$step_elapsed") | elapsed=$(format_seconds "$total_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | avg/run=$(format_seconds "$avg_per_run")"
+  log "[RUN ${RUNS_DONE}/${RUNS_TOTAL}] DONE ${label} | status=${RUN_STEP_STATUS} | took=$(format_seconds "$step_elapsed") | elapsed=$(format_seconds "$total_elapsed") | remaining~$(format_seconds "$remaining_est") | eta=${eta_str} | ${avg_label}/run=$(format_seconds "$avg_value") | avg_all/run=$(format_seconds "$avg_all")"
 }
 
 run_logged() {
@@ -275,12 +313,15 @@ run_cls_one() {
   local train_log="${train_dir}/train.log"
   local eval_log="${eval_dir}/eval.log"
   local done_marker="${eval_dir}/.done"
+  RUN_STEP_STATUS="unknown"
 
   if [[ "$SKIP_EXISTING" == "1" && -f "$done_marker" ]]; then
+    RUN_STEP_STATUS="skipped"
     return
   fi
   if [[ "$SKIP_EXISTING" == "1" ]] && is_cls_eval_complete "$eval_dir"; then
     touch "$done_marker"
+    RUN_STEP_STATUS="skipped"
     return
   fi
 
@@ -346,6 +387,7 @@ run_cls_one() {
   fi
 
   touch "$done_marker"
+  RUN_STEP_STATUS="executed"
 }
 
 run_ret_one() {
@@ -361,12 +403,15 @@ run_ret_one() {
   local train_log="${train_dir}/train.log"
   local eval_log="${eval_dir}/eval.log"
   local done_marker="${eval_dir}/.done"
+  RUN_STEP_STATUS="unknown"
 
   if [[ "$SKIP_EXISTING" == "1" && -f "$done_marker" ]]; then
+    RUN_STEP_STATUS="skipped"
     return
   fi
   if [[ "$SKIP_EXISTING" == "1" ]] && is_ret_eval_complete "$eval_dir"; then
     touch "$done_marker"
+    RUN_STEP_STATUS="skipped"
     return
   fi
 
@@ -434,6 +479,7 @@ run_ret_one() {
   fi
 
   touch "$done_marker"
+  RUN_STEP_STATUS="executed"
 }
 
 run_seg_one() {
@@ -449,12 +495,15 @@ run_seg_one() {
   local train_log="${train_dir}/train.log"
   local eval_log="${eval_dir}/eval.log"
   local done_marker="${eval_dir}/.done"
+  RUN_STEP_STATUS="unknown"
 
   if [[ "$SKIP_EXISTING" == "1" && -f "$done_marker" ]]; then
+    RUN_STEP_STATUS="skipped"
     return
   fi
   if [[ "$SKIP_EXISTING" == "1" ]] && is_seg_eval_complete "$eval_dir"; then
     touch "$done_marker"
+    RUN_STEP_STATUS="skipped"
     return
   fi
 
@@ -525,6 +574,7 @@ run_seg_one() {
   fi
 
   touch "$done_marker"
+  RUN_STEP_STATUS="executed"
 }
 
 log "===== LoRA Trade-off Batch Start ====="
