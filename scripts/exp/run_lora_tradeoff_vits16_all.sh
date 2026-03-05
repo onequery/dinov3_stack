@@ -4,8 +4,11 @@ set -euo pipefail
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$ROOT_DIR"
+export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${ROOT_DIR}/scripts/train:${PYTHONPATH}"
 
 MODEL_NAME="${MODEL_NAME:-dinov3_vits16}"
 REPO_DIR="${REPO_DIR:-dinov3}"
@@ -17,14 +20,17 @@ ETA_MIN_EXEC_SEC="${ETA_MIN_EXEC_SEC:-30}"
 
 UNFREEZE_BLOCKS_STR="${UNFREEZE_BLOCKS_STR:-0 2 4 12}"
 read -r -a UNFREEZE_BLOCKS <<<"$UNFREEZE_BLOCKS_STR"
+TASKS_STR="${TASKS_STR:-cls ret seg}"
+read -r -a TASKS <<<"$TASKS_STR"
+RUN_ABLATION="${RUN_ABLATION:-1}"
 
 GENERAL_WEIGHTS="${GENERAL_WEIGHTS:-dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth}"
 DOMAIN_WEIGHTS="${DOMAIN_WEIGHTS:-dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth}"
 
 # Classification
-CLS_TRAIN_DIR="${CLS_TRAIN_DIR:-input/Stent-First-Frame/train/}"
-CLS_VALID_DIR="${CLS_VALID_DIR:-input/Stent-First-Frame/valid/}"
-CLS_TEST_DIR="${CLS_TEST_DIR:-input/Stent-First-Frame/test/}"
+CLS_TRAIN_DIR="${CLS_TRAIN_DIR:-input/Stent-Ref/train/}"
+CLS_VALID_DIR="${CLS_VALID_DIR:-input/Stent-Ref/valid/}"
+CLS_TEST_DIR="${CLS_TEST_DIR:-input/Stent-Ref/test/}"
 CLS_CONFIG="${CLS_CONFIG:-configs_classification/stent.yaml}"
 CLS_BATCH_SIZE="${CLS_BATCH_SIZE:-32}"
 CLS_MAX_EPOCHS="${CLS_MAX_EPOCHS:-1000}"
@@ -122,6 +128,16 @@ format_seconds() {
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${LOG_PREFIX}$*"
+}
+
+task_enabled() {
+  local target="$1"
+  for t in "${TASKS[@]}"; do
+    if [[ "$t" == "$target" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 run_with_eta() {
@@ -328,7 +344,7 @@ run_cls_one() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local args=(
-    python train_classifier.py
+    python scripts/train/train_classifier.py
     --train-dir "$CLS_TRAIN_DIR"
     --valid-dir "$CLS_VALID_DIR"
     --weights "$weights"
@@ -377,7 +393,7 @@ run_cls_one() {
 
   if [[ "$SKIP_EXISTING" != "1" ]] || ! is_cls_eval_complete "$eval_dir"; then
     run_logged "$eval_log" \
-      python eval_classifier.py \
+      python scripts/eval/eval_classifier.py \
       --weights "$ckpt" \
       --input "$CLS_TEST_DIR" \
       --config "$CLS_CONFIG" \
@@ -418,7 +434,7 @@ run_ret_one() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local args=(
-    python train_retrieval.py
+    python scripts/train/train_retrieval.py
     --train-dir "$RET_TRAIN_DIR"
     --valid-dir "$RET_VALID_DIR"
     --weights "$weights"
@@ -468,7 +484,7 @@ run_ret_one() {
 
   if [[ "$SKIP_EXISTING" != "1" ]] || ! is_ret_eval_complete "$eval_dir"; then
     run_logged "$eval_log" \
-      python eval_retrieval.py \
+      python scripts/eval/eval_retrieval.py \
       --input "$RET_TEST_DIR" \
       --config "$RET_CONFIG" \
       --model-name "$MODEL_NAME" \
@@ -510,7 +526,7 @@ run_seg_one() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local args=(
-    python train_segmentation.py
+    python scripts/train/train_segmentation.py
     --train-images "$SEG_TRAIN_IMAGES"
     --train-masks "$SEG_TRAIN_MASKS"
     --valid-images "$SEG_VALID_IMAGES"
@@ -560,7 +576,7 @@ run_seg_one() {
 
   if [[ "$SKIP_EXISTING" != "1" ]] || ! is_seg_eval_complete "$eval_dir"; then
     run_logged "$eval_log" \
-      python eval_segmentation.py \
+      python scripts/eval/eval_segmentation.py \
       --eval-images "$SEG_TEST_IMAGES" \
       --eval-masks "$SEG_TEST_MASKS" \
       --config "$SEG_CONFIG" \
@@ -583,12 +599,38 @@ log "MODEL_NAME=${MODEL_NAME}"
 log "REPO_DIR=${REPO_DIR}"
 log "EXPERIMENT_ROOT=${EXPERIMENT_ROOT}"
 log "SKIP_EXISTING=${SKIP_EXISTING}"
+log "TASKS=${TASKS_STR}"
+log "RUN_ABLATION=${RUN_ABLATION}"
 log "ETA output: enabled (rolling average per run)"
 
+for task in "${TASKS[@]}"; do
+  case "$task" in
+    cls|ret|seg) ;;
+    *)
+      log "[ERROR] Invalid task in TASKS_STR: $task (allowed: cls ret seg)"
+      exit 1
+      ;;
+  esac
+done
+
+ENABLED_TASK_COUNT=0
+for task in cls ret seg; do
+  if task_enabled "$task"; then
+    ENABLED_TASK_COUNT=$((ENABLED_TASK_COUNT + 1))
+  fi
+done
+if (( ENABLED_TASK_COUNT == 0 )); then
+  log "[ERROR] No tasks enabled. Set TASKS_STR to one or more of: cls ret seg"
+  exit 1
+fi
+
 if [[ "$SMOKE_TEST" == "1" ]]; then
-  RUNS_TOTAL=$((3 * ${#UNFREEZE_BLOCKS[@]}))
+  RUNS_TOTAL=$((ENABLED_TASK_COUNT * ${#UNFREEZE_BLOCKS[@]}))
 else
-  RUNS_TOTAL=$((9 * ${#UNFREEZE_BLOCKS[@]} + 3))
+  RUNS_TOTAL=$((ENABLED_TASK_COUNT * 3 * ${#UNFREEZE_BLOCKS[@]}))
+  if [[ "$RUN_ABLATION" == "1" ]]; then
+    RUNS_TOTAL=$((RUNS_TOTAL + ENABLED_TASK_COUNT))
+  fi
 fi
 log "Planned run units: ${RUNS_TOTAL}"
 log "ETA will stabilize after a few completed runs."
@@ -596,21 +638,27 @@ log "ETA will stabilize after a few completed runs."
 assert_dir_exists "$REPO_DIR"
 assert_file_exists "$GENERAL_WEIGHTS"
 assert_file_exists "$DOMAIN_WEIGHTS"
-assert_dir_exists "$CLS_TRAIN_DIR"
-assert_dir_exists "$CLS_VALID_DIR"
-assert_dir_exists "$CLS_TEST_DIR"
-assert_dir_exists "$RET_TRAIN_DIR"
-assert_dir_exists "$RET_VALID_DIR"
-assert_dir_exists "$RET_TEST_DIR"
-assert_dir_exists "$SEG_TRAIN_IMAGES"
-assert_dir_exists "$SEG_TRAIN_MASKS"
-assert_dir_exists "$SEG_VALID_IMAGES"
-assert_dir_exists "$SEG_VALID_MASKS"
-assert_dir_exists "$SEG_TEST_IMAGES"
-assert_dir_exists "$SEG_TEST_MASKS"
+if task_enabled cls; then
+  assert_dir_exists "$CLS_TRAIN_DIR"
+  assert_dir_exists "$CLS_VALID_DIR"
+  assert_dir_exists "$CLS_TEST_DIR"
+fi
+if task_enabled ret; then
+  assert_dir_exists "$RET_TRAIN_DIR"
+  assert_dir_exists "$RET_VALID_DIR"
+  assert_dir_exists "$RET_TEST_DIR"
+fi
+if task_enabled seg; then
+  assert_dir_exists "$SEG_TRAIN_IMAGES"
+  assert_dir_exists "$SEG_TRAIN_MASKS"
+  assert_dir_exists "$SEG_VALID_IMAGES"
+  assert_dir_exists "$SEG_VALID_MASKS"
+  assert_dir_exists "$SEG_TEST_IMAGES"
+  assert_dir_exists "$SEG_TEST_MASKS"
+fi
 
 log "Calibrating parameter alignment"
-python calibrate_tradeoff_alignment.py \
+python scripts/exp/calibrate_tradeoff_alignment.py \
   --model-name "$MODEL_NAME" \
   --cls-config "$CLS_CONFIG" \
   --seg-config "$SEG_CONFIG" \
@@ -634,94 +682,106 @@ CSV
 for unfreeze_blocks in "${UNFREEZE_BLOCKS[@]}"; do
   run_tag="u$(printf '%02d' "$unfreeze_blocks")"
 
-  # CLS tradeoff
-  cls_a_train="${TRAIN_ROOT}/tradeoff/cls/caseA/${run_tag}"
-  cls_a_eval="${EVAL_ROOT}/tradeoff/cls/caseA/${run_tag}"
-  append_manifest tradeoff cls A case_a_general_bighead general "$unfreeze_blocks" 0 "$cls_a_train" "$cls_a_eval"
-  run_with_eta "tradeoff cls caseA ${run_tag}" run_cls_one "$cls_a_train" "$cls_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$CLS_BIG_HIDDEN" 0 0
+  if task_enabled cls; then
+    # CLS tradeoff
+    cls_a_train="${TRAIN_ROOT}/tradeoff/cls/caseA/${run_tag}"
+    cls_a_eval="${EVAL_ROOT}/tradeoff/cls/caseA/${run_tag}"
+    append_manifest tradeoff cls A case_a_general_bighead general "$unfreeze_blocks" 0 "$cls_a_train" "$cls_a_eval"
+    run_with_eta "tradeoff cls caseA ${run_tag}" run_cls_one "$cls_a_train" "$cls_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$CLS_BIG_HIDDEN" 0 0
 
-  if [[ "$SMOKE_TEST" != "1" ]]; then
-    cls_b_train="${TRAIN_ROOT}/tradeoff/cls/caseB/${run_tag}"
-    cls_b_eval="${EVAL_ROOT}/tradeoff/cls/caseB/${run_tag}"
-    append_manifest tradeoff cls B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$cls_b_train" "$cls_b_eval"
-    run_with_eta "tradeoff cls caseB ${run_tag}" run_cls_one "$cls_b_train" "$cls_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$CLS_BIG_HIDDEN" 0 0
+    if [[ "$SMOKE_TEST" != "1" ]]; then
+      cls_b_train="${TRAIN_ROOT}/tradeoff/cls/caseB/${run_tag}"
+      cls_b_eval="${EVAL_ROOT}/tradeoff/cls/caseB/${run_tag}"
+      append_manifest tradeoff cls B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$cls_b_train" "$cls_b_eval"
+      run_with_eta "tradeoff cls caseB ${run_tag}" run_cls_one "$cls_b_train" "$cls_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$CLS_BIG_HIDDEN" 0 0
 
-    cls_c_train="${TRAIN_ROOT}/tradeoff/cls/caseC/${run_tag}"
-    cls_c_eval="${EVAL_ROOT}/tradeoff/cls/caseC/${run_tag}"
-    append_manifest tradeoff cls C case_c_general_lora_small general "$unfreeze_blocks" "$CLS_LORA_RANK" "$cls_c_train" "$cls_c_eval"
-    run_with_eta "tradeoff cls caseC ${run_tag}" run_cls_one "$cls_c_train" "$cls_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 0 1 "$CLS_LORA_RANK"
+      cls_c_train="${TRAIN_ROOT}/tradeoff/cls/caseC/${run_tag}"
+      cls_c_eval="${EVAL_ROOT}/tradeoff/cls/caseC/${run_tag}"
+      append_manifest tradeoff cls C case_c_general_lora_small general "$unfreeze_blocks" "$CLS_LORA_RANK" "$cls_c_train" "$cls_c_eval"
+      run_with_eta "tradeoff cls caseC ${run_tag}" run_cls_one "$cls_c_train" "$cls_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 0 1 "$CLS_LORA_RANK"
+    fi
   fi
 
-  # RET tradeoff
-  ret_a_train="${TRAIN_ROOT}/tradeoff/ret/caseA/${run_tag}"
-  ret_a_eval="${EVAL_ROOT}/tradeoff/ret/caseA/${run_tag}"
-  append_manifest tradeoff ret A case_a_general_bighead general "$unfreeze_blocks" 0 "$ret_a_train" "$ret_a_eval"
-  run_with_eta "tradeoff ret caseA ${run_tag}" run_ret_one "$ret_a_train" "$ret_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$RET_BIG_HIDDEN" 0 0
+  if task_enabled ret; then
+    # RET tradeoff
+    ret_a_train="${TRAIN_ROOT}/tradeoff/ret/caseA/${run_tag}"
+    ret_a_eval="${EVAL_ROOT}/tradeoff/ret/caseA/${run_tag}"
+    append_manifest tradeoff ret A case_a_general_bighead general "$unfreeze_blocks" 0 "$ret_a_train" "$ret_a_eval"
+    run_with_eta "tradeoff ret caseA ${run_tag}" run_ret_one "$ret_a_train" "$ret_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$RET_BIG_HIDDEN" 0 0
 
-  if [[ "$SMOKE_TEST" != "1" ]]; then
-    ret_b_train="${TRAIN_ROOT}/tradeoff/ret/caseB/${run_tag}"
-    ret_b_eval="${EVAL_ROOT}/tradeoff/ret/caseB/${run_tag}"
-    append_manifest tradeoff ret B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$ret_b_train" "$ret_b_eval"
-    run_with_eta "tradeoff ret caseB ${run_tag}" run_ret_one "$ret_b_train" "$ret_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$RET_BIG_HIDDEN" 0 0
+    if [[ "$SMOKE_TEST" != "1" ]]; then
+      ret_b_train="${TRAIN_ROOT}/tradeoff/ret/caseB/${run_tag}"
+      ret_b_eval="${EVAL_ROOT}/tradeoff/ret/caseB/${run_tag}"
+      append_manifest tradeoff ret B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$ret_b_train" "$ret_b_eval"
+      run_with_eta "tradeoff ret caseB ${run_tag}" run_ret_one "$ret_b_train" "$ret_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$RET_BIG_HIDDEN" 0 0
 
-    ret_c_train="${TRAIN_ROOT}/tradeoff/ret/caseC/${run_tag}"
-    ret_c_eval="${EVAL_ROOT}/tradeoff/ret/caseC/${run_tag}"
-    append_manifest tradeoff ret C case_c_general_lora_small general "$unfreeze_blocks" "$RET_LORA_RANK" "$ret_c_train" "$ret_c_eval"
-    run_with_eta "tradeoff ret caseC ${run_tag}" run_ret_one "$ret_c_train" "$ret_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 0 1 "$RET_LORA_RANK"
+      ret_c_train="${TRAIN_ROOT}/tradeoff/ret/caseC/${run_tag}"
+      ret_c_eval="${EVAL_ROOT}/tradeoff/ret/caseC/${run_tag}"
+      append_manifest tradeoff ret C case_c_general_lora_small general "$unfreeze_blocks" "$RET_LORA_RANK" "$ret_c_train" "$ret_c_eval"
+      run_with_eta "tradeoff ret caseC ${run_tag}" run_ret_one "$ret_c_train" "$ret_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 0 1 "$RET_LORA_RANK"
+    fi
   fi
 
-  # SEG tradeoff
-  seg_a_train="${TRAIN_ROOT}/tradeoff/seg/caseA/${run_tag}"
-  seg_a_eval="${EVAL_ROOT}/tradeoff/seg/caseA/${run_tag}"
-  append_manifest tradeoff seg A case_a_general_bighead general "$unfreeze_blocks" 0 "$seg_a_train" "$seg_a_eval"
-  run_with_eta "tradeoff seg caseA ${run_tag}" run_seg_one "$seg_a_train" "$seg_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$SEG_BIG_CH" 0 0
+  if task_enabled seg; then
+    # SEG tradeoff
+    seg_a_train="${TRAIN_ROOT}/tradeoff/seg/caseA/${run_tag}"
+    seg_a_eval="${EVAL_ROOT}/tradeoff/seg/caseA/${run_tag}"
+    append_manifest tradeoff seg A case_a_general_bighead general "$unfreeze_blocks" 0 "$seg_a_train" "$seg_a_eval"
+    run_with_eta "tradeoff seg caseA ${run_tag}" run_seg_one "$seg_a_train" "$seg_a_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" big "$SEG_BIG_CH" 0 0
 
-  if [[ "$SMOKE_TEST" != "1" ]]; then
-    seg_b_train="${TRAIN_ROOT}/tradeoff/seg/caseB/${run_tag}"
-    seg_b_eval="${EVAL_ROOT}/tradeoff/seg/caseB/${run_tag}"
-    append_manifest tradeoff seg B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$seg_b_train" "$seg_b_eval"
-    run_with_eta "tradeoff seg caseB ${run_tag}" run_seg_one "$seg_b_train" "$seg_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$SEG_BIG_CH" 0 0
+    if [[ "$SMOKE_TEST" != "1" ]]; then
+      seg_b_train="${TRAIN_ROOT}/tradeoff/seg/caseB/${run_tag}"
+      seg_b_eval="${EVAL_ROOT}/tradeoff/seg/caseB/${run_tag}"
+      append_manifest tradeoff seg B case_b_domain_bighead domain "$unfreeze_blocks" 0 "$seg_b_train" "$seg_b_eval"
+      run_with_eta "tradeoff seg caseB ${run_tag}" run_seg_one "$seg_b_train" "$seg_b_eval" "$DOMAIN_WEIGHTS" "$unfreeze_blocks" big "$SEG_BIG_CH" 0 0
 
-    seg_c_train="${TRAIN_ROOT}/tradeoff/seg/caseC/${run_tag}"
-    seg_c_eval="${EVAL_ROOT}/tradeoff/seg/caseC/${run_tag}"
-    append_manifest tradeoff seg C case_c_general_lora_small general "$unfreeze_blocks" "$SEG_LORA_RANK" "$seg_c_train" "$seg_c_eval"
-    run_with_eta "tradeoff seg caseC ${run_tag}" run_seg_one "$seg_c_train" "$seg_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 256 1 "$SEG_LORA_RANK"
+      seg_c_train="${TRAIN_ROOT}/tradeoff/seg/caseC/${run_tag}"
+      seg_c_eval="${EVAL_ROOT}/tradeoff/seg/caseC/${run_tag}"
+      append_manifest tradeoff seg C case_c_general_lora_small general "$unfreeze_blocks" "$SEG_LORA_RANK" "$seg_c_train" "$seg_c_eval"
+      run_with_eta "tradeoff seg caseC ${run_tag}" run_seg_one "$seg_c_train" "$seg_c_eval" "$GENERAL_WEIGHTS" "$unfreeze_blocks" small 256 1 "$SEG_LORA_RANK"
+    fi
   fi
 done
 
 # N=0 head ablation rows and extra small-head runs
-if [[ "$SMOKE_TEST" != "1" ]]; then
+if [[ "$SMOKE_TEST" != "1" && "$RUN_ABLATION" == "1" ]]; then
   run_tag="u00"
 
-  # CLS ablation: run small-head baseline + reuse caseA/caseC N=0
-  cls_small_train="${TRAIN_ROOT}/ablation/cls/general_small_head/${run_tag}"
-  cls_small_eval="${EVAL_ROOT}/ablation/cls/general_small_head/${run_tag}"
-  append_manifest ablation cls A general_small_head general 0 0 "$cls_small_train" "$cls_small_eval"
-  run_with_eta "ablation cls general_small_head ${run_tag}" run_cls_one "$cls_small_train" "$cls_small_eval" "$GENERAL_WEIGHTS" 0 small 0 0 0
-  append_manifest ablation cls A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/cls/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/cls/caseA/${run_tag}"
-  append_manifest ablation cls C general_lora_small_head general 0 "$CLS_LORA_RANK" "${TRAIN_ROOT}/tradeoff/cls/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/cls/caseC/${run_tag}"
+  if task_enabled cls; then
+    # CLS ablation: run small-head baseline + reuse caseA/caseC N=0
+    cls_small_train="${TRAIN_ROOT}/ablation/cls/general_small_head/${run_tag}"
+    cls_small_eval="${EVAL_ROOT}/ablation/cls/general_small_head/${run_tag}"
+    append_manifest ablation cls A general_small_head general 0 0 "$cls_small_train" "$cls_small_eval"
+    run_with_eta "ablation cls general_small_head ${run_tag}" run_cls_one "$cls_small_train" "$cls_small_eval" "$GENERAL_WEIGHTS" 0 small 0 0 0
+    append_manifest ablation cls A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/cls/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/cls/caseA/${run_tag}"
+    append_manifest ablation cls C general_lora_small_head general 0 "$CLS_LORA_RANK" "${TRAIN_ROOT}/tradeoff/cls/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/cls/caseC/${run_tag}"
+  fi
 
-  # RET ablation
-  ret_small_train="${TRAIN_ROOT}/ablation/ret/general_small_head/${run_tag}"
-  ret_small_eval="${EVAL_ROOT}/ablation/ret/general_small_head/${run_tag}"
-  append_manifest ablation ret A general_small_head general 0 0 "$ret_small_train" "$ret_small_eval"
-  run_with_eta "ablation ret general_small_head ${run_tag}" run_ret_one "$ret_small_train" "$ret_small_eval" "$GENERAL_WEIGHTS" 0 small 0 0 0
-  append_manifest ablation ret A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/ret/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/ret/caseA/${run_tag}"
-  append_manifest ablation ret C general_lora_small_head general 0 "$RET_LORA_RANK" "${TRAIN_ROOT}/tradeoff/ret/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/ret/caseC/${run_tag}"
+  if task_enabled ret; then
+    # RET ablation
+    ret_small_train="${TRAIN_ROOT}/ablation/ret/general_small_head/${run_tag}"
+    ret_small_eval="${EVAL_ROOT}/ablation/ret/general_small_head/${run_tag}"
+    append_manifest ablation ret A general_small_head general 0 0 "$ret_small_train" "$ret_small_eval"
+    run_with_eta "ablation ret general_small_head ${run_tag}" run_ret_one "$ret_small_train" "$ret_small_eval" "$GENERAL_WEIGHTS" 0 small 0 0 0
+    append_manifest ablation ret A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/ret/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/ret/caseA/${run_tag}"
+    append_manifest ablation ret C general_lora_small_head general 0 "$RET_LORA_RANK" "${TRAIN_ROOT}/tradeoff/ret/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/ret/caseC/${run_tag}"
+  fi
 
-  # SEG ablation
-  seg_small_train="${TRAIN_ROOT}/ablation/seg/general_small_head/${run_tag}"
-  seg_small_eval="${EVAL_ROOT}/ablation/seg/general_small_head/${run_tag}"
-  append_manifest ablation seg A general_small_head general 0 0 "$seg_small_train" "$seg_small_eval"
-  run_with_eta "ablation seg general_small_head ${run_tag}" run_seg_one "$seg_small_train" "$seg_small_eval" "$GENERAL_WEIGHTS" 0 small 256 0 0
-  append_manifest ablation seg A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/seg/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/seg/caseA/${run_tag}"
-  append_manifest ablation seg C general_lora_small_head general 0 "$SEG_LORA_RANK" "${TRAIN_ROOT}/tradeoff/seg/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/seg/caseC/${run_tag}"
+  if task_enabled seg; then
+    # SEG ablation
+    seg_small_train="${TRAIN_ROOT}/ablation/seg/general_small_head/${run_tag}"
+    seg_small_eval="${EVAL_ROOT}/ablation/seg/general_small_head/${run_tag}"
+    append_manifest ablation seg A general_small_head general 0 0 "$seg_small_train" "$seg_small_eval"
+    run_with_eta "ablation seg general_small_head ${run_tag}" run_seg_one "$seg_small_train" "$seg_small_eval" "$GENERAL_WEIGHTS" 0 small 256 0 0
+    append_manifest ablation seg A general_big_head general 0 0 "${TRAIN_ROOT}/tradeoff/seg/caseA/${run_tag}" "${EVAL_ROOT}/tradeoff/seg/caseA/${run_tag}"
+    append_manifest ablation seg C general_lora_small_head general 0 "$SEG_LORA_RANK" "${TRAIN_ROOT}/tradeoff/seg/caseC/${run_tag}" "${EVAL_ROOT}/tradeoff/seg/caseC/${run_tag}"
+  fi
 else
-  log "SMOKE_TEST=1: skipping head ablation runs"
+  log "Skipping head ablation runs (SMOKE_TEST=${SMOKE_TEST}, RUN_ABLATION=${RUN_ABLATION})"
 fi
 
 log "Generating summary figures and analysis report"
-python summarize_lora_tradeoff.py \
+python scripts/exp/summarize_lora_tradeoff.py \
   --manifest "$MANIFEST" \
   --summary-dir "$SUMMARY_ROOT" \
   --report-dir "$REPORT_ROOT"
