@@ -12,6 +12,7 @@ Outputs:
 
 import argparse
 import glob
+import json
 import os
 from datetime import datetime
 from matplotlib.lines import Line2D
@@ -23,7 +24,7 @@ import seaborn as sns
 import torch
 import torchvision.transforms as transforms
 import yaml
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
 import math
 
@@ -59,7 +60,7 @@ def collect_image_paths(root_dir, exts=("png", "jpg", "jpeg")):
     return sorted(image_paths)
 
 
-def plot_simplex_2class(df, softmax_arr, class_names, out_path):
+def plot_simplex_2class(df, softmax_arr, class_names, out_path, decision_boundary_p0=None):
     """
     2-class simplex: probability strip
     """
@@ -135,10 +136,14 @@ def plot_simplex_2class(df, softmax_arr, class_names, out_path):
         frameon=False,
     )
 
-    plt.axvline(0.5, linestyle="--", color="gray", alpha=0.5)
+    boundary_x = 0.5 if decision_boundary_p0 is None else float(decision_boundary_p0)
+    plt.axvline(boundary_x, linestyle="--", color="gray", alpha=0.7)
     plt.yticks([])
     plt.xlabel(f"p({class_names[0]})")
-    plt.title("2-class Simplex (Probability Strip)")
+    if decision_boundary_p0 is None:
+        plt.title("2-class Simplex (Probability Strip)")
+    else:
+        plt.title(f"2-class Simplex (Decision boundary on p({class_names[0]})={boundary_x:.3f})")
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -297,6 +302,103 @@ def normalize_state_dict_keys(state_dict):
     return state_dict
 
 
+def resolve_positive_class_idx(class_names, class_to_idx, positive_class_name):
+    if positive_class_name is None:
+        return 1
+    if positive_class_name not in class_to_idx:
+        raise ValueError(
+            f"Unknown positive class '{positive_class_name}'. "
+            f"Available classes: {class_names}"
+        )
+    return class_to_idx[positive_class_name]
+
+
+def collect_samples(input_dir, class_to_idx, transform, model, device):
+    samples = []
+    for class_name in tqdm(sorted(os.listdir(input_dir)), desc="Classes"):
+        class_dir = os.path.join(input_dir, class_name)
+        if not os.path.isdir(class_dir):
+            continue
+
+        gt_label = class_to_idx[class_name]
+        for img_path in collect_image_paths(class_dir):
+            image = cv2.imread(img_path)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = transform(image).unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                logits = model(image)
+                probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
+            samples.append(
+                {
+                    "image_path": img_path,
+                    "gt_idx": int(gt_label),
+                    "probs": probs,
+                }
+            )
+    return samples
+
+
+def select_best_threshold_macro_f1(samples, positive_idx, steps=1001):
+    y_true_pos = np.array(
+        [1 if s["gt_idx"] == positive_idx else 0 for s in samples], dtype=np.int64
+    )
+    pos_probs = np.array([float(s["probs"][positive_idx]) for s in samples], dtype=np.float64)
+    thresholds = np.linspace(0.0, 1.0, steps)
+
+    best_threshold = 0.5
+    best_f1 = -1.0
+    for threshold in thresholds:
+        y_pred_pos = (pos_probs >= threshold).astype(np.int64)
+        metric = f1_score(y_true_pos, y_pred_pos, average="macro", zero_division=0.0)
+        if metric > best_f1 + 1e-12:
+            best_f1 = float(metric)
+            best_threshold = float(threshold)
+        elif abs(metric - best_f1) <= 1e-12:
+            if abs(float(threshold) - 0.5) < abs(best_threshold - 0.5):
+                best_threshold = float(threshold)
+    return best_threshold, best_f1
+
+
+def build_predictions(samples, class_names, positive_idx=None, threshold=None):
+    records = []
+    y_true, y_pred, softmax_vecs = [], [], []
+    negative_idx = None
+    if threshold is not None:
+        if positive_idx is None:
+            raise ValueError("positive_idx is required when threshold is provided.")
+        negative_idx = 1 - int(positive_idx)
+
+    for sample in samples:
+        probs = sample["probs"]
+        gt_idx = sample["gt_idx"]
+        if threshold is None:
+            pred_idx = int(np.argmax(probs))
+        else:
+            pred_idx = int(positive_idx) if probs[positive_idx] >= threshold else negative_idx
+
+        confidence = float(probs[pred_idx])
+
+        y_true.append(gt_idx)
+        y_pred.append(pred_idx)
+        softmax_vecs.append(probs)
+
+        record = {
+            "image_path": sample["image_path"],
+            "gt_label": class_names[gt_idx],
+            "pred_label": class_names[pred_idx],
+            "confidence": confidence,
+            "correct": int(gt_idx == pred_idx),
+        }
+        if threshold is not None:
+            record["positive_probability"] = float(probs[positive_idx])
+            record["decision_threshold"] = float(threshold)
+        records.append(record)
+
+    return records, y_true, y_pred, softmax_vecs
+
+
 # --------------------------------------------------
 # Args
 # --------------------------------------------------
@@ -307,6 +409,28 @@ parser.add_argument("--config", required=True)
 parser.add_argument("--model-name", default="dinov3_vits16")
 parser.add_argument("--out-dir", default="outputs/eval_results")
 parser.add_argument("--repo-dir", default=None)
+parser.add_argument(
+    "--threshold-mode",
+    choices=["argmax", "fixed", "tune_val_macro_f1"],
+    default="argmax",
+    help="prediction rule for binary classification",
+)
+parser.add_argument(
+    "--threshold",
+    type=float,
+    default=0.5,
+    help="fixed threshold for positive class when --threshold-mode fixed",
+)
+parser.add_argument(
+    "--threshold-val-input",
+    default=None,
+    help="validation directory used to tune threshold for --threshold-mode tune_val_macro_f1",
+)
+parser.add_argument(
+    "--threshold-positive-class",
+    default=None,
+    help="positive class name for thresholding; defaults to CLASS_NAMES[1]",
+)
 args = parser.parse_args()
 
 
@@ -408,44 +532,80 @@ else:
 # --------------------------------------------------
 # Inference
 # --------------------------------------------------
-records = []
-y_true, y_pred = [], []
-softmax_vecs = []  # ⭐ NEW
-
 print("\nRunning inference...\n")
+test_samples = collect_samples(args.input, class_to_idx, transform, model, DEVICE)
 
-for class_name in tqdm(sorted(os.listdir(args.input)), desc="Classes"):
-    class_dir = os.path.join(args.input, class_name)
-    if not os.path.isdir(class_dir):
-        continue
+threshold_info = {
+    "mode": args.threshold_mode,
+    "threshold": None,
+    "positive_class": None,
+    "positive_class_index": None,
+    "validation_dir": None,
+    "validation_macro_f1_at_selected_threshold": None,
+}
 
-    gt_label = class_to_idx[class_name]
+decision_threshold = None
+positive_class_idx = None
 
-    for img_path in collect_image_paths(class_dir):
-        image = cv2.imread(img_path)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image = transform(image).unsqueeze(0).to(DEVICE)
-
-        with torch.no_grad():
-            logits = model(image)
-            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
-        pred_label = int(np.argmax(probs))
-        confidence = float(probs[pred_label])
-
-        y_true.append(gt_label)
-        y_pred.append(pred_label)
-        softmax_vecs.append(probs)
-
-        records.append(
-            {
-                "image_path": img_path,
-                "gt_label": CLASS_NAMES[gt_label],
-                "pred_label": CLASS_NAMES[pred_label],
-                "confidence": confidence,
-                "correct": int(gt_label == pred_label),
-            }
+if args.threshold_mode != "argmax":
+    if len(CLASS_NAMES) != 2:
+        raise ValueError(
+            f"--threshold-mode {args.threshold_mode} requires binary classification, "
+            f"but got {len(CLASS_NAMES)} classes."
         )
+    if args.threshold_mode == "fixed":
+        if args.threshold < 0.0 or args.threshold > 1.0:
+            raise ValueError("--threshold must be within [0, 1].")
+        positive_class_idx = resolve_positive_class_idx(
+            CLASS_NAMES, class_to_idx, args.threshold_positive_class
+        )
+        decision_threshold = float(args.threshold)
+        threshold_info["mode"] = "fixed"
+        threshold_info["threshold"] = decision_threshold
+        threshold_info["positive_class"] = CLASS_NAMES[positive_class_idx]
+        threshold_info["positive_class_index"] = int(positive_class_idx)
+        print(
+            f"Using fixed decision threshold: {decision_threshold:.4f} "
+            f"(positive class={CLASS_NAMES[positive_class_idx]})"
+        )
+    else:
+        if not args.threshold_val_input:
+            raise ValueError(
+                "--threshold-val-input is required when "
+                "--threshold-mode tune_val_macro_f1 is selected."
+            )
+        positive_class_idx = resolve_positive_class_idx(
+            CLASS_NAMES, class_to_idx, args.threshold_positive_class
+        )
+        print(
+            f"Tuning decision threshold on validation set: {args.threshold_val_input} "
+            f"(positive class={CLASS_NAMES[positive_class_idx]})"
+        )
+        val_samples = collect_samples(
+            args.threshold_val_input, class_to_idx, transform, model, DEVICE
+        )
+        decision_threshold, val_best_macro_f1 = select_best_threshold_macro_f1(
+            val_samples, positive_class_idx
+        )
+        threshold_info["mode"] = "tune_val_macro_f1"
+        threshold_info["threshold"] = float(decision_threshold)
+        threshold_info["positive_class"] = CLASS_NAMES[positive_class_idx]
+        threshold_info["positive_class_index"] = int(positive_class_idx)
+        threshold_info["validation_dir"] = args.threshold_val_input
+        threshold_info["validation_macro_f1_at_selected_threshold"] = float(
+            val_best_macro_f1
+        )
+        print(
+            f"Selected threshold={decision_threshold:.4f} "
+            f"from validation macro-F1={val_best_macro_f1:.4f}"
+        )
+
+records, y_true, y_pred, softmax_vecs = build_predictions(
+    samples=test_samples,
+    class_names=CLASS_NAMES,
+    positive_idx=positive_class_idx,
+    threshold=decision_threshold,
+)
 
 
 # --------------------------------------------------
@@ -469,8 +629,28 @@ df.to_csv(
 )
 
 with open(os.path.join(args.out_dir, f"eval_result_{timestamp}.txt"), "w") as f:
+    if decision_threshold is None:
+        f.write("Prediction mode: argmax\n")
+    else:
+        f.write(f"Prediction mode: threshold ({threshold_info['mode']})\n")
+        f.write(
+            f"Positive class: {threshold_info['positive_class']} "
+            f"(index={threshold_info['positive_class_index']})\n"
+        )
+        f.write(f"Decision threshold: {threshold_info['threshold']:.4f}\n")
+        if threshold_info["validation_dir"] is not None:
+            f.write(f"Threshold validation set: {threshold_info['validation_dir']}\n")
+            f.write(
+                "Validation macro-F1 at selected threshold: "
+                f"{threshold_info['validation_macro_f1_at_selected_threshold']:.4f}\n"
+            )
+    f.write("\n")
     f.write(f"Accuracy: {accuracy:.4f}\n\n")
     f.write(cls_report)
+
+if decision_threshold is not None:
+    with open(os.path.join(args.out_dir, f"threshold_info_{timestamp}.json"), "w") as f:
+        json.dump(threshold_info, f, indent=2)
 
 
 # --------------------------------------------------
@@ -551,7 +731,19 @@ num_classes = softmax_arr.shape[1]
 simplex_path = os.path.join(args.out_dir, f"simplex_{num_classes}class_{timestamp}.png")
 
 if num_classes == 2:
-    plot_simplex_2class(df, softmax_arr, CLASS_NAMES, simplex_path)
+    decision_boundary_p0 = None
+    if decision_threshold is not None and positive_class_idx is not None:
+        if positive_class_idx == 0:
+            decision_boundary_p0 = decision_threshold
+        else:
+            decision_boundary_p0 = 1.0 - decision_threshold
+    plot_simplex_2class(
+        df,
+        softmax_arr,
+        CLASS_NAMES,
+        simplex_path,
+        decision_boundary_p0=decision_boundary_p0,
+    )
 
 elif num_classes == 3:
     plot_simplex_3class(df, softmax_arr, CLASS_NAMES, simplex_path)

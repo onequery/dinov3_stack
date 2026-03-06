@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import yaml
+from sklearn.metrics import f1_score
 from torch.optim.lr_scheduler import MultiStepLR
 from tqdm.auto import tqdm
 
@@ -209,8 +210,8 @@ parser.add_argument(
 parser.add_argument(
     "--early-stopping-monitor",
     dest="early_stopping_monitor",
-    choices=["val_loss", "val_acc"],
-    default="val_loss",
+    choices=["val_loss", "val_acc", "val_macro_f1"],
+    default="val_macro_f1",
     help="metric to monitor for early stopping",
 )
 args = parser.parse_args()
@@ -278,6 +279,8 @@ def train(model, trainloader, optimizer, criterion):
     train_running_loss = 0.0
     train_running_correct = 0
     counter = 0
+    y_true = []
+    y_pred = []
     for i, data in tqdm(enumerate(trainloader), total=len(trainloader)):
         counter += 1
         image, labels = data
@@ -292,6 +295,8 @@ def train(model, trainloader, optimizer, criterion):
         # Calculate the accuracy.
         _, preds = torch.max(outputs.data, 1)
         train_running_correct += (preds == labels).sum().item()
+        y_true.extend(labels.detach().cpu().tolist())
+        y_pred.extend(preds.detach().cpu().tolist())
         # Backpropagation.
         loss.backward()
         # Update the weights.
@@ -300,7 +305,8 @@ def train(model, trainloader, optimizer, criterion):
     # Loss and accuracy for the complete epoch.
     epoch_loss = train_running_loss / counter
     epoch_acc = 100.0 * (train_running_correct / len(trainloader.dataset))
-    return epoch_loss, epoch_acc
+    epoch_macro_f1 = f1_score(y_true, y_pred, average="macro")
+    return epoch_loss, epoch_acc, epoch_macro_f1
 
 
 # Validation function.
@@ -310,6 +316,8 @@ def validate(model, testloader, criterion, class_names):
     valid_running_loss = 0.0
     valid_running_correct = 0
     counter = 0
+    y_true = []
+    y_pred = []
 
     with torch.no_grad():
         for i, data in tqdm(enumerate(testloader), total=len(testloader)):
@@ -326,11 +334,14 @@ def validate(model, testloader, criterion, class_names):
             # Calculate the accuracy.
             _, preds = torch.max(outputs.data, 1)
             valid_running_correct += (preds == labels).sum().item()
+            y_true.extend(labels.detach().cpu().tolist())
+            y_pred.extend(preds.detach().cpu().tolist())
 
     # Loss and accuracy for the complete epoch.
     epoch_loss = valid_running_loss / counter
     epoch_acc = 100.0 * (valid_running_correct / len(testloader.dataset))
-    return epoch_loss, epoch_acc
+    epoch_macro_f1 = f1_score(y_true, y_pred, average="macro")
+    return epoch_loss, epoch_acc, epoch_macro_f1
 
 
 if __name__ == "__main__":
@@ -469,8 +480,17 @@ if __name__ == "__main__":
     # Loss function.
     criterion = nn.CrossEntropyLoss()
 
+    monitor_mode = "min" if args.early_stopping_monitor == "val_loss" else "max"
+    monitor_name_map = {
+        "val_loss": "validation loss",
+        "val_acc": "validation accuracy",
+        "val_macro_f1": "validation macro F1",
+    }
     # Initialize `SaveBestModel` class.
-    save_best_model = SaveBestModel()
+    save_best_model = SaveBestModel(
+        mode=monitor_mode,
+        metric_name=monitor_name_map[args.early_stopping_monitor],
+    )
 
     # Scheduler.
     scheduler = MultiStepLR(optimizer, milestones=args.scheduler, gamma=0.1)
@@ -478,41 +498,54 @@ if __name__ == "__main__":
     # Lists to keep track of losses and accuracies.
     train_loss, valid_loss = [], []
     train_acc, valid_acc = [], []
+    train_macro_f1, valid_macro_f1 = [], []
     # Start the training.
     epochs_trained = 0
-    if args.early_stopping_monitor == "val_loss":
+    if monitor_mode == "min":
         best_metric = float("inf")
     else:
         best_metric = -float("inf")
     patience_counter = 0
     for epoch in range(epochs):
         log_with_time(f"[INFO]: Epoch {epoch+1} of {epochs}")
-        train_epoch_loss, train_epoch_acc = train(
+        train_epoch_loss, train_epoch_acc, train_epoch_macro_f1 = train(
             model, train_loader, optimizer, criterion
         )
-        valid_epoch_loss, valid_epoch_acc = validate(
+        valid_epoch_loss, valid_epoch_acc, valid_epoch_macro_f1 = validate(
             model, valid_loader, criterion, dataset_classes
         )
         train_loss.append(train_epoch_loss)
         valid_loss.append(valid_epoch_loss)
         train_acc.append(train_epoch_acc)
         valid_acc.append(valid_epoch_acc)
+        train_macro_f1.append(train_epoch_macro_f1)
+        valid_macro_f1.append(valid_epoch_macro_f1)
         log_with_time(
-            f"Training loss: {train_epoch_loss:.3f}, training acc: {train_epoch_acc:.3f}"
+            "Training loss: "
+            f"{train_epoch_loss:.3f}, "
+            f"training acc: {train_epoch_acc:.3f}, "
+            f"training macro F1: {train_epoch_macro_f1:.4f}"
         )
         log_with_time(
-            f"Validation loss: {valid_epoch_loss:.3f}, validation acc: {valid_epoch_acc:.3f}"
+            "Validation loss: "
+            f"{valid_epoch_loss:.3f}, "
+            f"validation acc: {valid_epoch_acc:.3f}, "
+            f"validation macro F1: {valid_epoch_macro_f1:.4f}"
         )
-        save_best_model(valid_epoch_loss, epoch, model, out_dir, args.save_name)
+        monitor_value_map = {
+            "val_loss": valid_epoch_loss,
+            "val_acc": valid_epoch_acc,
+            "val_macro_f1": valid_epoch_macro_f1,
+        }
+        current_metric = monitor_value_map[args.early_stopping_monitor]
+        save_best_model(current_metric, epoch, model, out_dir, args.save_name)
         epochs_trained = epoch + 1
         if args.early_stopping:
-            if args.early_stopping_monitor == "val_loss":
-                current_metric = valid_epoch_loss
+            if monitor_mode == "min":
                 improved = current_metric < (
                     best_metric - args.early_stopping_min_delta
                 )
             else:
-                current_metric = valid_epoch_acc
                 improved = current_metric > (
                     best_metric + args.early_stopping_min_delta
                 )
@@ -536,5 +569,13 @@ if __name__ == "__main__":
     # Save the trained model weights.
     save_model(epochs_trained, model, optimizer, criterion, out_dir, args.save_name)
     # Save the loss and accuracy plots.
-    save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir)
+    save_plots(
+        train_acc,
+        valid_acc,
+        train_loss,
+        valid_loss,
+        out_dir,
+        train_macro_f1=train_macro_f1,
+        valid_macro_f1=valid_macro_f1,
+    )
     log_with_time("TRAINING COMPLETE")

@@ -37,7 +37,10 @@ CLS_MAX_EPOCHS="${CLS_MAX_EPOCHS:-1000}"
 CLS_NUM_WORKERS="${CLS_NUM_WORKERS:-24}"
 CLS_EARLY_STOP_PATIENCE="${CLS_EARLY_STOP_PATIENCE:-30}"
 CLS_EARLY_STOP_MIN_DELTA="${CLS_EARLY_STOP_MIN_DELTA:-0.0}"
-CLS_EARLY_STOP_MONITOR="${CLS_EARLY_STOP_MONITOR:-val_loss}"
+CLS_EARLY_STOP_MONITOR="${CLS_EARLY_STOP_MONITOR:-val_macro_f1}"
+CLS_EVAL_THRESHOLD_MODE="${CLS_EVAL_THRESHOLD_MODE:-tune_val_macro_f1}"
+CLS_EVAL_THRESHOLD="${CLS_EVAL_THRESHOLD:-0.5}"
+CLS_EVAL_THRESHOLD_POS_CLASS="${CLS_EVAL_THRESHOLD_POS_CLASS:-stent}"
 CLS_HEAD_LR="${CLS_HEAD_LR:-0.001}"
 CLS_FT_HEAD_LR="${CLS_FT_HEAD_LR:-0.0001}"
 CLS_FT_BACKBONE_LR="${CLS_FT_BACKBONE_LR:-0.00001}"
@@ -392,14 +395,27 @@ run_cls_one() {
   assert_file_exists "$ckpt"
 
   if [[ "$SKIP_EXISTING" != "1" ]] || ! is_cls_eval_complete "$eval_dir"; then
-    run_logged "$eval_log" \
-      python scripts/eval/eval_classifier.py \
-      --weights "$ckpt" \
-      --input "$CLS_TEST_DIR" \
-      --config "$CLS_CONFIG" \
-      --model-name "$MODEL_NAME" \
-      --repo-dir "$REPO_DIR" \
+    local eval_args=(
+      python scripts/eval/eval_classifier.py
+      --weights "$ckpt"
+      --input "$CLS_TEST_DIR"
+      --config "$CLS_CONFIG"
+      --model-name "$MODEL_NAME"
+      --repo-dir "$REPO_DIR"
       --out-dir "$eval_dir"
+      --threshold-mode "$CLS_EVAL_THRESHOLD_MODE"
+    )
+
+    if [[ -n "$CLS_EVAL_THRESHOLD_POS_CLASS" ]]; then
+      eval_args+=(--threshold-positive-class "$CLS_EVAL_THRESHOLD_POS_CLASS")
+    fi
+    if [[ "$CLS_EVAL_THRESHOLD_MODE" == "fixed" ]]; then
+      eval_args+=(--threshold "$CLS_EVAL_THRESHOLD")
+    elif [[ "$CLS_EVAL_THRESHOLD_MODE" == "tune_val_macro_f1" ]]; then
+      eval_args+=(--threshold-val-input "$CLS_VALID_DIR")
+    fi
+
+    run_logged "$eval_log" "${eval_args[@]}"
   fi
 
   touch "$done_marker"
