@@ -169,7 +169,7 @@ def setup_console_and_file_logging(
             log_path = output_root / log_path
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = output_root / f"analysis_anatomy_identity_proxy_{stamp}.log"
+        log_path = output_root / f"1_anatomy_identity_proxy_{stamp}.log"
 
     ensure_dir(log_path.parent)
     file_handle = open(log_path, "a", encoding="utf-8", buffering=1)
