@@ -109,12 +109,19 @@ class ProgressTracker:
         self.total_steps = max(1, int(total_steps))
         self.completed_steps = 0
         self.start_time = time.time()
+        self.current_step_name = ""
+        self.current_step_started_at = self.start_time
+        self.completed_step_history: List[Dict[str, float | str]] = []
 
     def start_step(self, name: str) -> None:
+        self.current_step_name = str(name)
+        self.current_step_started_at = time.time()
         current = min(self.total_steps, self.completed_steps + 1)
         log(f"[ETA][FULL-RUN] Step {current}/{self.total_steps} START | {name}")
 
     def finish_step(self, name: str) -> None:
+        step_duration = max(0.0, time.time() - self.current_step_started_at)
+        self.completed_step_history.append({"name": str(name), "seconds": float(step_duration)})
         self.completed_steps = min(self.total_steps, self.completed_steps + 1)
         elapsed = max(0.0, time.time() - self.start_time)
         progress = 100.0 * self.completed_steps / self.total_steps
@@ -125,6 +132,35 @@ class ProgressTracker:
             f"[ETA][FULL-RUN] Step {self.completed_steps}/{self.total_steps} DONE | {name} | "
             f"progress={progress:.1f}% | elapsed={format_duration(elapsed)} | "
             f"remaining~{format_duration(remaining)} | eta={eta_dt.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        self.current_step_name = ""
+
+    def current_step_elapsed_seconds(self) -> float:
+        return max(0.0, time.time() - self.current_step_started_at)
+
+    def average_completed_short_step_seconds(self, default_seconds: float = 60.0) -> float:
+        short_durations = [
+            float(item["seconds"])
+            for item in self.completed_step_history
+            if not str(item["name"]).startswith("Run ")
+        ]
+        if short_durations:
+            return sum(short_durations) / len(short_durations)
+        return float(default_seconds)
+
+    def live_eta_from_remaining(self, remaining_seconds: float, note: str = "") -> None:
+        elapsed = max(0.0, time.time() - self.start_time)
+        remaining = max(0.0, float(remaining_seconds))
+        total_runtime = elapsed + remaining
+        overall_progress = (elapsed / total_runtime) if total_runtime > 0.0 else 0.0
+        eta_dt = datetime.now() + timedelta(seconds=remaining)
+        current_step = self.current_step_name or "unknown"
+        suffix = f" | {note}" if note else ""
+        log(
+            f"[ETA][FULL-RUN][LIVE] step={self.completed_steps + 1}/{self.total_steps} | "
+            f"current_step={current_step} | overall_progress={overall_progress * 100.0:.1f}% | "
+            f"elapsed={format_duration(elapsed)} | "
+            f"remaining~{format_duration(remaining)} | eta={eta_dt.strftime('%Y-%m-%d %H:%M:%S')}{suffix}"
         )
 
 
@@ -167,7 +203,7 @@ class EpochETATracker:
             f"epoch={epoch}/{self.max_epoch} | "
             f"epoch_time={format_duration(epoch_seconds)} | avg_epoch={format_duration(avg_epoch_this_lr)} | "
             f"remaining_this_lr~{format_duration(remaining_this_lr)} | "
-            f"remaining_total~{format_duration(remaining_total)} | "
+            f"remaining_substep_total~{format_duration(remaining_total)} | "
             f"eta={eta_dt.strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
@@ -176,6 +212,14 @@ class EpochETATracker:
         if skipped <= 0:
             return
         self.total_epoch_budget = max(self.completed_epochs, self.total_epoch_budget - skipped)
+
+    def total_progress(self) -> float:
+        return min(1.0, max(0.0, self.completed_epochs / max(1, self.total_epoch_budget)))
+
+    def remaining_total_seconds(self) -> float:
+        total_elapsed = max(0.0, time.time() - self.global_start)
+        avg_epoch_total = total_elapsed / max(1, self.completed_epochs)
+        return max(0.0, (self.total_epoch_budget - self.completed_epochs) * avg_epoch_total)
 
 
 class MaskOnlyDataset(Dataset):
@@ -736,6 +780,7 @@ def train_probe_with_lr_search(
     valid_targets: torch.Tensor,
     args: argparse.Namespace,
     out_root: Path,
+    full_run_tracker: ProgressTracker | None = None,
 ) -> Tuple[nn.Module, float, int, List[Dict[str, object]], Dict[str, object]]:
     device = resolve_device(args.device)
     num_classes = 2
@@ -829,6 +874,32 @@ def train_probe_with_lr_search(
                 f"valid_dice={valid_metrics['dice']:.6f}"
             )
             eta_tracker.finish_epoch(epoch=epoch, epoch_seconds=(time.time() - epoch_start))
+            if full_run_tracker is not None:
+                substep_remaining = eta_tracker.remaining_total_seconds()
+                current_step_elapsed = full_run_tracker.current_step_elapsed_seconds()
+                short_step_avg = full_run_tracker.average_completed_short_step_seconds(default_seconds=45.0)
+                current_step_tail_overhead = max(short_step_avg, 60.0)
+                future_short_steps = 4 * short_step_avg
+                future_other_training_step = 0.0
+                if backbone_name == "imagenet":
+                    future_other_training_step = max(
+                        substep_remaining,
+                        current_step_elapsed + substep_remaining,
+                    )
+                full_run_remaining = (
+                    substep_remaining
+                    + current_step_tail_overhead
+                    + future_other_training_step
+                    + future_short_steps
+                )
+                full_run_tracker.live_eta_from_remaining(
+                    remaining_seconds=full_run_remaining,
+                    note=(
+                        f"backbone={backbone_name} | lr={lr} | epoch={epoch}/{int(args.max_epoch)} | "
+                        f"substep_remaining~{format_duration(substep_remaining)} | "
+                        f"future_training_est~{format_duration(future_other_training_step)}"
+                    ),
+                )
 
             improved = valid_metrics["miou"] > (best_metric_for_lr + float(args.early_stopping_min_delta))
             if improved:
@@ -1326,6 +1397,7 @@ def main() -> None:
             valid_targets=targets["valid"],
             args=args,
             out_root=out_root,
+            full_run_tracker=tracker,
         )
         imagenet_valid_metrics, _ = evaluate_probe_split(
             model=imagenet_model,
@@ -1408,6 +1480,7 @@ def main() -> None:
             valid_targets=targets["valid"],
             args=args,
             out_root=out_root,
+            full_run_tracker=tracker,
         )
         cag_valid_metrics, _ = evaluate_probe_split(
             model=cag_model,
