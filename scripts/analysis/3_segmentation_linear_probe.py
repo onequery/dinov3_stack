@@ -758,6 +758,92 @@ def clone_state_dict(module: nn.Module) -> Dict[str, torch.Tensor]:
     return {key: value.detach().cpu().clone() for key, value in module.state_dict().items()}
 
 
+def checkpoint_path_for_backbone(out_root: Path, backbone_name: str) -> Path:
+    return out_root / f"probe_checkpoint_{backbone_name}.pt"
+
+
+def resume_path_for_backbone(out_root: Path, backbone_name: str) -> Path:
+    return out_root / f"probe_resume_{backbone_name}.pt"
+
+
+def safe_torch_save(payload: Dict[str, object], path: Path) -> None:
+    ensure_dir(path.parent)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
+
+
+def load_torch_checkpoint_if_valid(path: Path, expected_signature: str) -> Dict[str, object] | None:
+    if not path.exists():
+        return None
+    payload = torch.load(path, map_location="cpu")
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("signature") != expected_signature:
+        return None
+    return payload
+
+
+def remove_file_if_exists(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def move_optimizer_state_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device=device)
+
+
+def build_probe_training_signature(
+    backbone_name: str,
+    backbone_ckpt_path: str,
+    train_features: torch.Tensor,
+    train_targets: torch.Tensor,
+    valid_features: torch.Tensor,
+    valid_targets: torch.Tensor,
+    args: argparse.Namespace,
+) -> str:
+    payload = {
+        "backbone_name": backbone_name,
+        "backbone_ckpt_path": str(Path(backbone_ckpt_path).expanduser().resolve()),
+        "model_name": str(args.model_name),
+        "repo_dir": str(Path(args.repo_dir).expanduser().resolve()),
+        "img_size": [int(args.img_size[0]), int(args.img_size[1])],
+        "patch_size": int(args.patch_size),
+        "lr_grid": [float(x) for x in args.lr_grid],
+        "max_epoch": int(args.max_epoch),
+        "early_stopping_patience": int(args.early_stopping_patience),
+        "early_stopping_min_delta": float(args.early_stopping_min_delta),
+        "train_features_shape": list(train_features.shape),
+        "train_features_dtype": str(train_features.dtype),
+        "train_targets_shape": list(train_targets.shape),
+        "train_targets_dtype": str(train_targets.dtype),
+        "valid_features_shape": list(valid_features.shape),
+        "valid_features_dtype": str(valid_features.dtype),
+        "valid_targets_shape": list(valid_targets.shape),
+        "valid_targets_dtype": str(valid_targets.dtype),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def instantiate_probe_model(
+    in_channels: int,
+    output_size: Tuple[int, int],
+    device: torch.device,
+    num_classes: int = 2,
+) -> StrictLinearSegProbe:
+    return StrictLinearSegProbe(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        output_size=output_size,
+    ).to(device)
+
+
 def select_best_candidate(
     current_score: float,
     current_lr: float,
@@ -774,6 +860,7 @@ def select_best_candidate(
 
 def train_probe_with_lr_search(
     backbone_name: str,
+    backbone_ckpt_path: str,
     train_features: torch.Tensor,
     train_targets: torch.Tensor,
     valid_features: torch.Tensor,
@@ -805,6 +892,38 @@ def train_probe_with_lr_search(
         pin_memory=pin_memory,
     )
 
+    signature = build_probe_training_signature(
+        backbone_name=backbone_name,
+        backbone_ckpt_path=backbone_ckpt_path,
+        train_features=train_features,
+        train_targets=train_targets,
+        valid_features=valid_features,
+        valid_targets=valid_targets,
+        args=args,
+    )
+    final_ckpt_path = checkpoint_path_for_backbone(out_root, backbone_name)
+    resume_ckpt_path = resume_path_for_backbone(out_root, backbone_name)
+    history_path = out_root / f"history_{backbone_name}.json"
+
+    final_payload = load_torch_checkpoint_if_valid(final_ckpt_path, signature)
+    if final_payload is not None:
+        log(f"[{backbone_name}] Reusing final trained probe checkpoint: {final_ckpt_path}")
+        best_model = instantiate_probe_model(
+            in_channels=in_channels,
+            output_size=output_size,
+            device=device,
+            num_classes=num_classes,
+        )
+        best_model.load_state_dict(final_payload["best_state"], strict=True)
+        return (
+            best_model,
+            float(final_payload["best_lr"]),
+            int(final_payload["best_epochs_trained"]),
+            list(final_payload["best_history"]),
+            dict(final_payload["lr_search_results"]),
+        )
+
+    resume_payload = load_torch_checkpoint_if_valid(resume_ckpt_path, signature)
     best_lr: float | None = None
     best_epochs_trained = 0
     best_history: List[Dict[str, object]] = []
@@ -816,24 +935,89 @@ def train_probe_with_lr_search(
         lr_values=[float(x) for x in args.lr_grid],
         max_epoch=int(args.max_epoch),
     )
+    if resume_payload is not None:
+        lr_search_results = dict(resume_payload.get("lr_search_results", lr_search_results))
+        best_lr_value = resume_payload.get("best_lr")
+        best_lr = float(best_lr_value) if best_lr_value is not None else None
+        best_epochs_trained = int(resume_payload.get("best_epochs_trained", 0))
+        best_history = list(resume_payload.get("best_history", []))
+        best_state_value = resume_payload.get("best_state")
+        best_state = best_state_value if isinstance(best_state_value, dict) else None
+        best_valid_score = float(resume_payload.get("best_valid_score", best_valid_score))
+        eta_state = resume_payload.get("eta_state", {})
+        if isinstance(eta_state, dict):
+            eta_tracker.completed_epochs = int(eta_state.get("completed_epochs", eta_tracker.completed_epochs))
+            eta_tracker.total_epoch_budget = int(
+                eta_state.get("total_epoch_budget", eta_tracker.total_epoch_budget)
+            )
+            elapsed_seconds = float(eta_state.get("elapsed_seconds", 0.0))
+            if elapsed_seconds > 0.0:
+                eta_tracker.global_start = time.time() - elapsed_seconds
 
     lr_values = [float(x) for x in args.lr_grid]
+    start_lr_index = 1
+    active_resume_state: Dict[str, object] | None = None
+    if resume_payload is not None:
+        stage = str(resume_payload.get("stage", ""))
+        if stage == "between_candidates":
+            start_lr_index = int(resume_payload.get("next_lr_index", 1))
+            log(
+                f"[{backbone_name}] Resuming after completed candidate(s) | "
+                f"next_lr_index={start_lr_index}"
+            )
+        elif stage == "epoch":
+            start_lr_index = int(resume_payload.get("current_lr_index", 1))
+            active_resume_state = resume_payload
+            log(
+                f"[{backbone_name}] Resuming mid-candidate | "
+                f"lr_index={start_lr_index} epoch={int(resume_payload.get('current_epoch', 0)) + 1}"
+            )
+
     for lr_index, lr in enumerate(lr_values, start=1):
+        if lr_index < start_lr_index:
+            continue
         log(f"[{backbone_name}] LR search start | lr={lr}")
         eta_tracker.start_lr(lr=lr, candidate_index=lr_index)
-        model = StrictLinearSegProbe(
+        model = instantiate_probe_model(
             in_channels=in_channels,
-            num_classes=num_classes,
             output_size=output_size,
-        ).to(device)
+            device=device,
+            num_classes=num_classes,
+        )
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
         best_state_for_lr = clone_state_dict(model)
         best_metric_for_lr = -float("inf")
         best_epoch_for_lr = 0
         epochs_without_improve = 0
         history_for_lr: List[Dict[str, object]] = []
+        start_epoch = 1
 
-        for epoch in range(1, int(args.max_epoch) + 1):
+        if active_resume_state is not None and lr_index == start_lr_index:
+            resume_lr = float(active_resume_state.get("current_lr", lr))
+            if abs(resume_lr - float(lr)) > 1e-12:
+                raise ValueError(
+                    f"Resume lr mismatch for {backbone_name}: expected {lr}, got {resume_lr}"
+                )
+            model.load_state_dict(active_resume_state["model_state"], strict=True)
+            optimizer.load_state_dict(active_resume_state["optimizer_state"])
+            move_optimizer_state_to_device(optimizer, device)
+            best_state_for_lr = active_resume_state["best_state_for_lr"]
+            best_metric_for_lr = float(active_resume_state.get("best_metric_for_lr", best_metric_for_lr))
+            best_epoch_for_lr = int(active_resume_state.get("best_epoch_for_lr", 0))
+            epochs_without_improve = int(active_resume_state.get("epochs_without_improve", 0))
+            history_for_lr = list(active_resume_state.get("history_for_lr", []))
+            start_epoch = int(active_resume_state.get("current_epoch", 0)) + 1
+            eta_lr_state = active_resume_state.get("eta_lr_state", {})
+            if isinstance(eta_lr_state, dict):
+                eta_tracker.current_lr_epoch_times = list(
+                    map(float, eta_lr_state.get("current_lr_epoch_times", []))
+                )
+            log(
+                f"[{backbone_name}] Loaded resume checkpoint | lr={lr} | "
+                f"start_epoch={start_epoch}"
+            )
+
+        for epoch in range(start_epoch, int(args.max_epoch) + 1):
             epoch_start = time.time()
             train_metrics = run_probe_epoch(
                 model=model,
@@ -910,6 +1094,39 @@ def train_probe_with_lr_search(
             else:
                 epochs_without_improve += 1
 
+            safe_torch_save(
+                {
+                    "signature": signature,
+                    "stage": "epoch",
+                    "current_lr_index": int(lr_index),
+                    "current_lr": float(lr),
+                    "current_epoch": int(epoch),
+                    "model_state": clone_state_dict(model),
+                    "optimizer_state": copy.deepcopy(optimizer.state_dict()),
+                    "best_state_for_lr": best_state_for_lr,
+                    "best_metric_for_lr": float(best_metric_for_lr),
+                    "best_epoch_for_lr": int(best_epoch_for_lr),
+                    "epochs_without_improve": int(epochs_without_improve),
+                    "history_for_lr": history_for_lr,
+                    "lr_search_results": lr_search_results,
+                    "best_lr": best_lr,
+                    "best_epochs_trained": int(best_epochs_trained),
+                    "best_history": best_history,
+                    "best_state": best_state,
+                    "best_valid_score": float(best_valid_score),
+                    "probe_params": int(probe_params),
+                    "eta_state": {
+                        "completed_epochs": int(eta_tracker.completed_epochs),
+                        "total_epoch_budget": int(eta_tracker.total_epoch_budget),
+                        "elapsed_seconds": float(max(0.0, time.time() - eta_tracker.global_start)),
+                    },
+                    "eta_lr_state": {
+                        "current_lr_epoch_times": list(map(float, eta_tracker.current_lr_epoch_times)),
+                    },
+                },
+                resume_ckpt_path,
+            )
+
             if epochs_without_improve >= int(args.early_stopping_patience):
                 log(
                     f"[{backbone_name}] early stopping | lr={lr} "
@@ -942,8 +1159,29 @@ def train_probe_with_lr_search(
             best_valid_score = float(best_metric_for_lr)
             best_lr = float(lr)
             best_epochs_trained = int(len(history_for_lr))
-            best_history = history_for_lr
+            best_history = list(history_for_lr)
             best_state = best_state_for_lr
+
+        safe_torch_save(
+            {
+                "signature": signature,
+                "stage": "between_candidates",
+                "next_lr_index": int(lr_index + 1),
+                "lr_search_results": lr_search_results,
+                "best_lr": best_lr,
+                "best_epochs_trained": int(best_epochs_trained),
+                "best_history": best_history,
+                "best_state": best_state,
+                "best_valid_score": float(best_valid_score),
+                "probe_params": int(probe_params),
+                "eta_state": {
+                    "completed_epochs": int(eta_tracker.completed_epochs),
+                    "total_epoch_budget": int(eta_tracker.total_epoch_budget),
+                    "elapsed_seconds": float(max(0.0, time.time() - eta_tracker.global_start)),
+                },
+            },
+            resume_ckpt_path,
+        )
 
         del model
         if device.type == "cuda":
@@ -952,21 +1190,38 @@ def train_probe_with_lr_search(
     if best_lr is None or best_state is None:
         raise RuntimeError(f"Failed to train any probe candidate for {backbone_name}")
 
-    best_model = StrictLinearSegProbe(
+    best_model = instantiate_probe_model(
         in_channels=in_channels,
-        num_classes=num_classes,
         output_size=output_size,
-    ).to(device)
+        device=device,
+        num_classes=num_classes,
+    )
     best_model.load_state_dict(best_state, strict=True)
     lr_search_results["best_lr"] = best_lr
     lr_search_results["best_valid_miou"] = best_valid_score
     lr_search_results["epochs_trained"] = best_epochs_trained
     lr_search_results["probe_params"] = probe_params
 
-    history_path = out_root / f"history_{backbone_name}.json"
     with open(history_path, "w", encoding="utf-8") as f:
         json.dump(best_history, f, indent=2)
     log(f"Saved best history: {history_path}")
+
+    safe_torch_save(
+        {
+            "signature": signature,
+            "backbone_name": backbone_name,
+            "best_lr": float(best_lr),
+            "best_epochs_trained": int(best_epochs_trained),
+            "best_history": best_history,
+            "best_state": best_state,
+            "best_valid_score": float(best_valid_score),
+            "lr_search_results": lr_search_results,
+            "probe_params": int(probe_params),
+        },
+        final_ckpt_path,
+    )
+    remove_file_if_exists(resume_ckpt_path)
+    log(f"[{backbone_name}] Saved final probe checkpoint: {final_ckpt_path}")
 
     return best_model, best_lr, best_epochs_trained, best_history, lr_search_results
 
@@ -1391,6 +1646,7 @@ def main() -> None:
         )
         imagenet_model, imagenet_best_lr, imagenet_epochs_trained, imagenet_history, imagenet_lr_search = train_probe_with_lr_search(
             backbone_name="imagenet",
+            backbone_ckpt_path=ckpt_imagenet,
             train_features=imagenet_train_features,
             train_targets=targets["train"],
             valid_features=imagenet_valid_features,
@@ -1474,6 +1730,7 @@ def main() -> None:
         )
         cag_model, cag_best_lr, cag_epochs_trained, cag_history, cag_lr_search = train_probe_with_lr_search(
             backbone_name="cag",
+            backbone_ckpt_path=ckpt_cag,
             train_features=cag_train_features,
             train_targets=targets["train"],
             valid_features=cag_valid_features,
