@@ -17,39 +17,39 @@ TEST_IMAGES="${TEST_IMAGES:-input/MPXA-Seg/test_images}"
 TEST_MASKS="${TEST_MASKS:-input/MPXA-Seg/test_labels}"
 SEG_CONFIG="${SEG_CONFIG:-configs_segmentation/mpxa-seg.yaml}"
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/7_vessel_background_separability}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/local_2_segmentation_linear_probe}"
 DEVICE="${DEVICE:-cuda}"
 MODEL_NAME="${MODEL_NAME:-dinov3_vits16}"
 REPO_DIR="${REPO_DIR:-dinov3}"
 IMAGENET_CKPT="${IMAGENET_CKPT:-dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth}"
 CAG_CKPT="${CAG_CKPT:-dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth}"
 
-IMG_W="${IMG_W:-448}"
-IMG_H="${IMG_H:-448}"
+IMG_W="${IMG_W:-640}"
+IMG_H="${IMG_H:-640}"
 PATCH_SIZE="${PATCH_SIZE:-16}"
-VESSEL_FRAC_POS_THR="${VESSEL_FRAC_POS_THR:-0.10}"
-BACKGROUND_FRAC_NEG_THR="${BACKGROUND_FRAC_NEG_THR:-0.01}"
-TRAIN_MAX_POS_PER_IMAGE="${TRAIN_MAX_POS_PER_IMAGE:-32}"
-TRAIN_MAX_NEG_PER_IMAGE="${TRAIN_MAX_NEG_PER_IMAGE:-32}"
-VALID_MAX_POS_PER_IMAGE="${VALID_MAX_POS_PER_IMAGE:-32}"
-VALID_MAX_NEG_PER_IMAGE="${VALID_MAX_NEG_PER_IMAGE:-32}"
-VIZ_SAMPLES_PER_CLASS="${VIZ_SAMPLES_PER_CLASS:-2000}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
+FEATURE_BATCH_SIZE="${FEATURE_BATCH_SIZE:-16}"
+PROBE_BATCH_SIZE="${PROBE_BATCH_SIZE:-32}"
+MAX_EPOCH="${MAX_EPOCH:-200}"
+EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-20}"
+EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0.0}"
+LR_GRID_STR="${LR_GRID_STR:-1e-2 3e-3 1e-3}"
+read -r -a LR_GRID <<<"${LR_GRID_STR}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 SEED="${SEED:-42}"
+NUM_EXAMPLE_IMAGES="${NUM_EXAMPLE_IMAGES:-8}"
 MAX_IMAGES_PER_SPLIT="${MAX_IMAGES_PER_SPLIT:-}"
 LOG_FILE="${LOG_FILE:-run_gpu${CUDA_VISIBLE_DEVICES}.log}"
 
-echo "[run_2_vessel_background_separability] ROOT_DIR=${ROOT_DIR}"
-echo "[run_2_vessel_background_separability] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "[run_2_vessel_background_separability] OUTPUT_ROOT=${OUTPUT_ROOT}"
+echo "[run_local_2_segmentation_linear_probe] ROOT_DIR=${ROOT_DIR}"
+echo "[run_local_2_segmentation_linear_probe] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "[run_local_2_segmentation_linear_probe] OUTPUT_ROOT=${OUTPUT_ROOT}"
 
 CMD=(
   conda run --no-capture-output -n "${CONDA_ENV}"
   env
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
   PYTHONUNBUFFERED="${PYTHONUNBUFFERED}"
-  python scripts/analysis/2_vessel_background_separability.py
+  python scripts/analysis/local_2_segmentation_linear_probe.py
   --train-images "${TRAIN_IMAGES}"
   --train-masks "${TRAIN_MASKS}"
   --valid-images "${VALID_IMAGES}"
@@ -60,23 +60,22 @@ CMD=(
   --imagenet-ckpt "${IMAGENET_CKPT}"
   --cag-ckpt "${CAG_CKPT}"
   --output-root "${OUTPUT_ROOT}"
-  --model-name "${MODEL_NAME}"
-  --repo-dir "${REPO_DIR}"
+  --log-file "${LOG_FILE}"
   --img-size "${IMG_W}" "${IMG_H}"
   --patch-size "${PATCH_SIZE}"
-  --vessel-frac-pos-thr "${VESSEL_FRAC_POS_THR}"
-  --background-frac-neg-thr "${BACKGROUND_FRAC_NEG_THR}"
-  --train-max-pos-per-image "${TRAIN_MAX_POS_PER_IMAGE}"
-  --train-max-neg-per-image "${TRAIN_MAX_NEG_PER_IMAGE}"
-  --valid-max-pos-per-image "${VALID_MAX_POS_PER_IMAGE}"
-  --valid-max-neg-per-image "${VALID_MAX_NEG_PER_IMAGE}"
-  --viz-samples-per-class "${VIZ_SAMPLES_PER_CLASS}"
-  --batch-size "${BATCH_SIZE}"
-  --num-workers "${NUM_WORKERS}"
+  --feature-batch-size "${FEATURE_BATCH_SIZE}"
+  --probe-batch-size "${PROBE_BATCH_SIZE}"
+  --max-epoch "${MAX_EPOCH}"
+  --early-stopping-patience "${EARLY_STOPPING_PATIENCE}"
+  --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA}"
   --device "${DEVICE}"
+  --num-workers "${NUM_WORKERS}"
   --seed "${SEED}"
+  --num-example-images "${NUM_EXAMPLE_IMAGES}"
+  --model-name "${MODEL_NAME}"
+  --repo-dir "${REPO_DIR}"
   --cache-features
-  --log-file "${LOG_FILE}"
+  --lr-grid "${LR_GRID[@]}"
 )
 
 if [[ -n "${MAX_IMAGES_PER_SPLIT}" ]]; then
@@ -85,7 +84,7 @@ fi
 
 CMD+=("$@")
 
-printf '[run_2_vessel_background_separability] CMD:'
+printf '[run_local_2_segmentation_linear_probe] CMD:'
 printf ' %q' "${CMD[@]}"
 printf '\n'
 

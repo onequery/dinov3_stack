@@ -10,7 +10,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 IMAGE_ROOT="${IMAGE_ROOT:-input/Stent-Contrast}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/6_anatomy_identity_proxy}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/global_1_anatomy_identity_proxy}"
 DEVICE="${DEVICE:-cuda}"
 
 MODEL_NAME="${MODEL_NAME:-dinov3_vits16}"
@@ -27,16 +27,16 @@ CENTER_CROP_SIZE="${CENTER_CROP_SIZE:-448}"
 MAX_IMAGES="${MAX_IMAGES:-}"
 LOG_FILE="${LOG_FILE:-run_gpu${CUDA_VISIBLE_DEVICES}.log}"
 
-echo "[run_1_anatomy_identity_proxy] ROOT_DIR=${ROOT_DIR}"
-echo "[run_1_anatomy_identity_proxy] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "[run_1_anatomy_identity_proxy] OUTPUT_ROOT=${OUTPUT_ROOT}"
+echo "[run_global_1_anatomy_identity_proxy] ROOT_DIR=${ROOT_DIR}"
+echo "[run_global_1_anatomy_identity_proxy] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "[run_global_1_anatomy_identity_proxy] OUTPUT_ROOT=${OUTPUT_ROOT}"
 
 CMD=(
   conda run --no-capture-output -n "${CONDA_ENV}"
   env
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
   PYTHONUNBUFFERED="${PYTHONUNBUFFERED}"
-  python scripts/analysis/1_anatomy_identity_proxy.py
+  python scripts/analysis/global_1_anatomy_identity_proxy.py
   --image-root "${IMAGE_ROOT}"
   --imagenet-ckpt "${IMAGENET_CKPT}"
   --cag-ckpt "${CAG_CKPT}"
@@ -59,7 +59,7 @@ fi
 
 CMD+=("$@")
 
-printf '[run_1_anatomy_identity_proxy] CMD:'
+printf '[run_global_1_anatomy_identity_proxy] CMD:'
 printf ' %q' "${CMD[@]}"
 printf '\n'
 

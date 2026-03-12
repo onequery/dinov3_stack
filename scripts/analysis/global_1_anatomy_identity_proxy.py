@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analysis 1 — Anatomy Identity Proxy Analysis
+Global Analysis 1 — Anatomy Identity Proxy Analysis
 
 Compare frozen backbone representations between:
 1) ImageNet-1K pretrained backbone
@@ -169,7 +169,7 @@ def setup_console_and_file_logging(
             log_path = output_root / log_path
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = output_root / f"1_anatomy_identity_proxy_{stamp}.log"
+        log_path = output_root / f"global_1_anatomy_identity_proxy_{stamp}.log"
 
     ensure_dir(log_path.parent)
     file_handle = open(log_path, "a", encoding="utf-8", buffering=1)
@@ -777,7 +777,7 @@ def write_markdown_summary(
         )
 
     lines = [
-        "# Analysis 1 — Anatomy Identity Proxy",
+        "# Global Analysis 1 — Anatomy Identity Proxy",
         "",
         "## Scope",
         "- This analysis is limited to the proxy definition: `same patient same study` vs `diff patient diff study`.",
@@ -828,7 +828,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-root", default="input/Stent-Contrast")
     parser.add_argument("--imagenet-ckpt", default=DEFAULT_IMAGENET_CKPT)
     parser.add_argument("--cag-ckpt", default=DEFAULT_CAG_CKPT)
-    parser.add_argument("--output-root", default="outputs/6_anatomy_identity_proxy")
+    parser.add_argument("--output-root", default="outputs/global_1_anatomy_identity_proxy")
 
     parser.add_argument("--model-name", default="dinov3_vits16")
     parser.add_argument("--repo-dir", default="dinov3")

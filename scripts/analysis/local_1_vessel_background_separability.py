@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analysis 2 — Vessel vs Background Separability
+Local Analysis 1 — Vessel vs Background Separability
 
 Compare frozen patch-token representations between:
 1) ImageNet-1K pretrained backbone
@@ -197,7 +197,7 @@ def setup_console_and_file_logging(
             log_path = output_root / log_path
     else:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = output_root / f"2_vessel_background_separability_{stamp}.log"
+        log_path = output_root / f"local_1_vessel_background_separability_{stamp}.log"
 
     ensure_dir(log_path.parent)
     file_handle = open(log_path, "a", encoding="utf-8", buffering=1)
@@ -854,7 +854,7 @@ def write_markdown_summary(
         )
 
     lines = [
-        "# Analysis 2 — Vessel vs Background Separability",
+        "# Local Analysis 1 — Vessel vs Background Separability",
         "",
         "## Setup",
         "- Patch token source: last-layer `x_norm_patchtokens`",
@@ -898,7 +898,7 @@ def write_markdown_summary(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Analysis 2 — Vessel vs Background Separability")
+    parser = argparse.ArgumentParser(description="Local Analysis 1 — Vessel vs Background Separability")
     parser.add_argument("--train-images", default="input/MPXA-Seg/train_images")
     parser.add_argument("--train-masks", default="input/MPXA-Seg/train_labels")
     parser.add_argument("--valid-images", default="input/MPXA-Seg/valid_images")
@@ -908,7 +908,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seg-config", default="configs_segmentation/mpxa-seg.yaml")
     parser.add_argument("--imagenet-ckpt", default=DEFAULT_IMAGENET_CKPT)
     parser.add_argument("--cag-ckpt", default=DEFAULT_CAG_CKPT)
-    parser.add_argument("--output-root", default="outputs/7_vessel_background_separability")
+    parser.add_argument("--output-root", default="outputs/local_1_vessel_background_separability")
     parser.add_argument("--model-name", default="dinov3_vits16")
     parser.add_argument("--repo-dir", default="dinov3")
     parser.add_argument("--img-size", nargs=2, type=int, default=[448, 448], help="width height")
