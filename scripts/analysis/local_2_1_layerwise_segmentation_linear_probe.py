@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Sequence, TextIO, Tuple
 
@@ -35,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seg-config", default="configs_segmentation/mpxa-seg.yaml")
     parser.add_argument("--imagenet-ckpt", default=common.DEFAULT_IMAGENET_CKPT)
     parser.add_argument("--cag-ckpt", default=common.DEFAULT_CAG_CKPT)
-    parser.add_argument("--output-root", default="outputs/local_2_1_layerwise_segmentation_linear_probe")
+    parser.add_argument("--output-root", default="outputs/local_2_1_layerwise_segmentation_linear_probe_multiseed")
     parser.add_argument("--log-file", default=None)
     parser.add_argument("--img-size", nargs=2, type=int, default=[640, 640], help="width height")
     parser.add_argument("--patch-size", type=int, default=16)
@@ -46,9 +48,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stopping-min-delta", type=float, default=0.0)
     parser.add_argument("--lr-grid", nargs="+", type=float, default=[1e-2, 3e-3, 1e-3])
     parser.add_argument("--layers", nargs="+", default=["all"], help="1-based layer ids or 'all'")
+    parser.add_argument("--seeds", nargs="+", type=int, default=[11, 22, 33])
+    parser.add_argument("--strict-deterministic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--keep-feature-caches", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-images-per-split", type=int, default=None)
@@ -65,6 +68,13 @@ def parse_layer_ids(layer_args: Sequence[str], total_layers: int = 12) -> List[i
         raise ValueError("At least one layer must be provided.")
     if values[0] < 1 or values[-1] > total_layers:
         raise ValueError(f"Layer ids must be between 1 and {total_layers}: {values}")
+    return values
+
+
+def parse_seed_values(seed_args: Sequence[int]) -> List[int]:
+    values = sorted({int(seed) for seed in seed_args})
+    if not values:
+        raise ValueError("At least one seed must be provided.")
     return values
 
 
@@ -235,11 +245,13 @@ def cleanup_backbone_feature_caches(out_root: Path, backbone_name: str, split_na
             common.remove_file_if_exists(mmap_path)
 
 
-def metrics_row_with_layer(split_metrics: common.SplitMetrics, layer_id: int) -> Dict[str, object]:
+def metrics_row_with_seed_and_layer(split_metrics: common.SplitMetrics, seed: int, layer_id: int) -> Dict[str, object]:
     row = split_metrics.to_row()
+    row["seed"] = int(seed)
     row["layer_id"] = int(layer_id)
     row["block_index"] = int(layer_id - 1)
     preferred_order = [
+        "seed",
         "backbone_name",
         "layer_id",
         "block_index",
@@ -257,18 +269,94 @@ def metrics_row_with_layer(split_metrics: common.SplitMetrics, layer_id: int) ->
     return {key: row[key] for key in preferred_order}
 
 
-def save_layerwise_curve(summary_df: pd.DataFrame, metric: str, ylabel: str, title: str, output_path: Path) -> None:
+def _parse_json_list_column(series: pd.Series) -> List[List[float]]:
+    return [list(map(float, json.loads(value))) for value in series.tolist()]
+
+
+def build_aggregate_summary(raw_df: pd.DataFrame) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    for (backbone_name, layer_id, block_index, split), group in raw_df.groupby(
+        ["backbone_name", "layer_id", "block_index", "split"],
+        sort=True,
+    ):
+        best_lr_counts = Counter(map(str, group["best_lr"].tolist()))
+        best_lr_mode = float(group["best_lr"].mode().iloc[0])
+        per_class_iou = np.asarray(_parse_json_list_column(group["per_class_iou"]), dtype=np.float64)
+        per_class_dice = np.asarray(_parse_json_list_column(group["per_class_dice"]), dtype=np.float64)
+        rows.append(
+            {
+                "backbone_name": backbone_name,
+                "layer_id": int(layer_id),
+                "block_index": int(block_index),
+                "split": split,
+                "num_seeds": int(len(group)),
+                "miou_mean": float(group["miou"].mean()),
+                "miou_std": float(group["miou"].std(ddof=0)),
+                "dice_mean": float(group["dice"].mean()),
+                "dice_std": float(group["dice"].std(ddof=0)),
+                "pixel_acc_mean": float(group["pixel_acc"].mean()),
+                "pixel_acc_std": float(group["pixel_acc"].std(ddof=0)),
+                "best_lr_mode": best_lr_mode,
+                "best_lr_counts": json.dumps(dict(sorted(best_lr_counts.items()))),
+                "epochs_trained_mean": float(group["epochs_trained"].mean()),
+                "epochs_trained_std": float(group["epochs_trained"].std(ddof=0)),
+                "num_images": int(group["num_images"].iloc[0]),
+                "per_class_iou_mean": json.dumps(np.mean(per_class_iou, axis=0).tolist()),
+                "per_class_iou_std": json.dumps(np.std(per_class_iou, axis=0, ddof=0).tolist()),
+                "per_class_dice_mean": json.dumps(np.mean(per_class_dice, axis=0).tolist()),
+                "per_class_dice_std": json.dumps(np.std(per_class_dice, axis=0, ddof=0).tolist()),
+                "probe_params": int(group["probe_params"].iloc[0]),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["layer_id", "backbone_name", "split"]).reset_index(drop=True)
+
+
+def build_paired_delta_df(raw_df: pd.DataFrame, split: str = "test") -> pd.DataFrame:
+    split_df = raw_df[raw_df["split"] == split].copy()
+    pivot = split_df.pivot_table(
+        index=["seed", "layer_id", "block_index"],
+        columns="backbone_name",
+        values=["miou", "dice"],
+        aggfunc="first",
+    ).sort_index()
+    rows: List[Dict[str, object]] = []
+    for (seed, layer_id, block_index), values in pivot.iterrows():
+        if ("miou", "imagenet") not in pivot.columns or ("miou", "cag") not in pivot.columns:
+            continue
+        rows.append(
+            {
+                "seed": int(seed),
+                "layer_id": int(layer_id),
+                "block_index": int(block_index),
+                "miou_delta": float(values[("miou", "cag")] - values[("miou", "imagenet")]),
+                "dice_delta": float(values[("dice", "cag")] - values[("dice", "imagenet")]),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["layer_id", "seed"]).reset_index(drop=True)
+
+
+def save_layerwise_curve(summary_df: pd.DataFrame, metric_prefix: str, ylabel: str, title: str, output_path: Path) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy()
     fig, ax = plt.subplots(figsize=(8.6, 4.8))
     for backbone_name, label in [("imagenet", "ImageNet"), ("cag", "CAG")]:
         sub = test_df[test_df["backbone_name"] == backbone_name].sort_values("layer_id")
+        mean_col = f"{metric_prefix}_mean"
+        std_col = f"{metric_prefix}_std"
         ax.plot(
             sub["layer_id"],
-            sub[metric],
+            sub[mean_col],
             marker="o",
             linewidth=2.0,
             color=PLOT_COLORS[backbone_name],
             label=label,
+        )
+        ax.fill_between(
+            sub["layer_id"],
+            sub[mean_col] - sub[std_col],
+            sub[mean_col] + sub[std_col],
+            color=PLOT_COLORS[backbone_name],
+            alpha=0.18,
+            linewidth=0.0,
         )
     ax.set_xlabel("Layer")
     ax.set_ylabel(ylabel)
@@ -281,21 +369,39 @@ def save_layerwise_curve(summary_df: pd.DataFrame, metric: str, ylabel: str, tit
     plt.close(fig)
 
 
-def save_delta_figure(summary_df: pd.DataFrame, output_path: Path) -> None:
-    test_df = summary_df[summary_df["split"] == "test"].copy()
-    pivot = test_df.pivot(index="layer_id", columns="backbone_name", values=["miou", "dice"]).sort_index()
-    delta_miou = pivot[("miou", "cag")] - pivot[("miou", "imagenet")]
-    delta_dice = pivot[("dice", "cag")] - pivot[("dice", "imagenet")]
+def save_delta_figure(delta_df: pd.DataFrame, output_path: Path) -> None:
+    grouped = delta_df.groupby("layer_id", sort=True).agg(
+        miou_mean=("miou_delta", "mean"),
+        miou_std=("miou_delta", lambda s: float(np.std(s.to_numpy(dtype=float), ddof=0))),
+        dice_mean=("dice_delta", "mean"),
+        dice_std=("dice_delta", lambda s: float(np.std(s.to_numpy(dtype=float), ddof=0))),
+    ).reset_index()
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.6), sharex=True)
-    axes[0].plot(delta_miou.index, delta_miou.values, marker="o", color="#C44E52")
-    axes[1].plot(delta_dice.index, delta_dice.values, marker="o", color="#55A868")
-    for ax, ylabel in zip(axes, ["Delta mIoU (CAG-ImageNet)", "Delta Dice (CAG-ImageNet)"]):
+    axes[0].plot(grouped["layer_id"], grouped["miou_mean"], marker="o", color="#C44E52")
+    axes[1].plot(grouped["layer_id"], grouped["dice_mean"], marker="o", color="#55A868")
+    axes[0].fill_between(
+        grouped["layer_id"],
+        grouped["miou_mean"] - grouped["miou_std"],
+        grouped["miou_mean"] + grouped["miou_std"],
+        color="#C44E52",
+        alpha=0.18,
+        linewidth=0.0,
+    )
+    axes[1].fill_between(
+        grouped["layer_id"],
+        grouped["dice_mean"] - grouped["dice_std"],
+        grouped["dice_mean"] + grouped["dice_std"],
+        color="#55A868",
+        alpha=0.18,
+        linewidth=0.0,
+    )
+    for ax, ylabel in zip(axes, ["Paired Delta mIoU (CAG-ImageNet)", "Paired Delta Dice (CAG-ImageNet)"]):
         ax.axhline(0.0, color="#444444", linewidth=1.0, linestyle="--")
         ax.set_xlabel("Layer")
         ax.set_ylabel(ylabel)
-        ax.set_xticks(delta_miou.index.tolist())
+        ax.set_xticks(grouped["layer_id"].tolist())
         ax.grid(alpha=0.25)
-    fig.suptitle("Layer-wise Delta: CAG minus ImageNet", y=0.98)
+    fig.suptitle("Layer-wise Paired Delta: CAG minus ImageNet (mean ± std)", y=0.98)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
@@ -303,7 +409,8 @@ def save_delta_figure(summary_df: pd.DataFrame, output_path: Path) -> None:
 
 def save_per_class_iou(summary_df: pd.DataFrame, class_names: Sequence[str], output_path: Path) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy().copy()
-    test_df["per_class_iou_list"] = test_df["per_class_iou"].apply(json.loads)
+    test_df["per_class_iou_mean_list"] = test_df["per_class_iou_mean"].apply(json.loads)
+    test_df["per_class_iou_std_list"] = test_df["per_class_iou_std"].apply(json.loads)
     fig, axes = plt.subplots(1, len(class_names), figsize=(5.4 * len(class_names), 4.8), sharex=True)
     if len(class_names) == 1:
         axes = [axes]
@@ -311,8 +418,18 @@ def save_per_class_iou(summary_df: pd.DataFrame, class_names: Sequence[str], out
         ax = axes[class_idx]
         for backbone_name, label in [("imagenet", "ImageNet"), ("cag", "CAG")]:
             sub = test_df[test_df["backbone_name"] == backbone_name].sort_values("layer_id")
-            ys = [float(values[class_idx]) for values in sub["per_class_iou_list"]]
-            ax.plot(sub["layer_id"], ys, marker="o", linewidth=2.0, color=PLOT_COLORS[backbone_name], label=label)
+            ys = [float(values[class_idx]) for values in sub["per_class_iou_mean_list"]]
+            stds = [float(values[class_idx]) for values in sub["per_class_iou_std_list"]]
+            xs = sub["layer_id"]
+            ax.plot(xs, ys, marker="o", linewidth=2.0, color=PLOT_COLORS[backbone_name], label=label)
+            ax.fill_between(
+                xs,
+                np.asarray(ys) - np.asarray(stds),
+                np.asarray(ys) + np.asarray(stds),
+                color=PLOT_COLORS[backbone_name],
+                alpha=0.18,
+                linewidth=0.0,
+            )
         ax.set_title(f"IoU: {class_name}")
         ax.set_xlabel("Layer")
         ax.set_ylabel("IoU")
@@ -326,9 +443,9 @@ def save_per_class_iou(summary_df: pd.DataFrame, class_names: Sequence[str], out
 
 
 def derive_interpretation(test_df: pd.DataFrame) -> str:
-    pivot = test_df.pivot(index="layer_id", columns="backbone_name", values=["miou", "dice"]).sort_index()
-    delta_miou = (pivot[("miou", "cag")] - pivot[("miou", "imagenet")]).to_numpy(dtype=float)
-    delta_dice = (pivot[("dice", "cag")] - pivot[("dice", "imagenet")]).to_numpy(dtype=float)
+    pivot = test_df.pivot(index="layer_id", columns="backbone_name", values=["miou_mean", "dice_mean"]).sort_index()
+    delta_miou = (pivot[("miou_mean", "cag")] - pivot[("miou_mean", "imagenet")]).to_numpy(dtype=float)
+    delta_dice = (pivot[("dice_mean", "cag")] - pivot[("dice_mean", "imagenet")]).to_numpy(dtype=float)
     n_layers = len(delta_miou)
     if n_layers == 0:
         return "insufficient results"
@@ -343,13 +460,25 @@ def derive_interpretation(test_df: pd.DataFrame) -> str:
         return "suggests a dense transfer weakness beyond late-layer retention alone"
     if float(np.max(np.abs(np.concatenate([delta_miou, delta_dice])))) < 0.01:
         return "pattern is small and potentially variance-sensitive; confirm with additional seeds before method changes"
-    return "shows a mixed depth-dependent pattern; retention and optimization effects remain entangled"
+    return "shows a mixed depth-dependent pattern; inspect paired delta variance before drawing structural conclusions"
 
 
-def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, selected_layers: Sequence[int]) -> None:
+def write_markdown_summary(
+    output_path: Path,
+    summary_df: pd.DataFrame,
+    delta_df: pd.DataFrame,
+    selected_layers: Sequence[int],
+    seed_values: Sequence[int],
+) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy().sort_values(["layer_id", "backbone_name"])
     interpretation = derive_interpretation(test_df)
-    pivot = test_df.pivot(index="layer_id", columns="backbone_name", values=["miou", "dice"]).sort_index()
+    pivot = test_df.pivot(index="layer_id", columns="backbone_name", values=["miou_mean", "dice_mean"]).sort_index()
+    delta_grouped = delta_df.groupby("layer_id", sort=True).agg(
+        miou_delta_mean=("miou_delta", "mean"),
+        miou_delta_std=("miou_delta", lambda s: float(np.std(s.to_numpy(dtype=float), ddof=0))),
+        dice_delta_mean=("dice_delta", "mean"),
+        dice_delta_std=("dice_delta", lambda s: float(np.std(s.to_numpy(dtype=float), ddof=0))),
+    ).reset_index()
     lines = [
         "# Local Analysis 2-1 — Layer-wise Segmentation Linear Probe",
         "",
@@ -357,22 +486,30 @@ def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, selected
         "- Strict probe: normalized patch token + 1x1 conv + bilinear upsampling",
         "- Backbone is fully frozen",
         "- Layers evaluated: " + ", ".join(map(str, selected_layers)),
+        "- Seeds: " + ", ".join(map(str, seed_values)),
+        "- Aggregate rule: mean ± std over fixed seed set",
+        "- Delta rule: paired CAG(seed) - ImageNet(seed)",
         "- Input size: 640x640",
         "- Patch size: 16 (40x40 grid)",
         "- Probe parameters: 770 per layer",
         "",
-        "## Test Metrics by Layer",
+        "## Test Metrics by Layer (test split)",
         "",
-        "| Layer | ImageNet mIoU | CAG mIoU | ImageNet Dice | CAG Dice | Delta mIoU | Delta Dice |",
+        "| Layer | ImageNet mIoU | CAG mIoU | ImageNet Dice | CAG Dice | Paired Delta mIoU | Paired Delta Dice |",
         "|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    delta_lookup = delta_grouped.set_index("layer_id")
     for layer_id in pivot.index.tolist():
-        im_miou = float(pivot.loc[layer_id, ("miou", "imagenet")])
-        cg_miou = float(pivot.loc[layer_id, ("miou", "cag")])
-        im_dice = float(pivot.loc[layer_id, ("dice", "imagenet")])
-        cg_dice = float(pivot.loc[layer_id, ("dice", "cag")])
+        im_miou = float(pivot.loc[layer_id, ("miou_mean", "imagenet")])
+        cg_miou = float(pivot.loc[layer_id, ("miou_mean", "cag")])
+        im_dice = float(pivot.loc[layer_id, ("dice_mean", "imagenet")])
+        cg_dice = float(pivot.loc[layer_id, ("dice_mean", "cag")])
+        miou_delta_mean = float(delta_lookup.loc[layer_id, "miou_delta_mean"])
+        miou_delta_std = float(delta_lookup.loc[layer_id, "miou_delta_std"])
+        dice_delta_mean = float(delta_lookup.loc[layer_id, "dice_delta_mean"])
+        dice_delta_std = float(delta_lookup.loc[layer_id, "dice_delta_std"])
         lines.append(
-            f"| {layer_id} | {im_miou:.6f} | {cg_miou:.6f} | {im_dice:.6f} | {cg_dice:.6f} | {cg_miou - im_miou:.6f} | {cg_dice - im_dice:.6f} |"
+            f"| {layer_id} | {im_miou:.6f} | {cg_miou:.6f} | {im_dice:.6f} | {cg_dice:.6f} | {miou_delta_mean:.6f} ± {miou_delta_std:.6f} | {dice_delta_mean:.6f} ± {dice_delta_std:.6f} |"
         )
     lines.extend(
         [
@@ -380,7 +517,8 @@ def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, selected
             "## Interpretation",
             f"- {interpretation}",
             "- This analysis localizes the last-layer segmentation linear probe result across depth.",
-            "- Positive earlier/mid-layer deltas with negative late-layer deltas support a depth-wise dense retention failure hypothesis.",
+            "- Positive earlier/mid-layer deltas with negative late-layer deltas across multiple seeds support a depth-wise dense retention failure hypothesis.",
+            "- Small deltas with large std indicate a variance-sensitive probe result and should not be over-interpreted.",
             "",
         ]
     )
@@ -391,8 +529,9 @@ def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, selected
 
 def main() -> None:
     args = parse_args()
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    seed_values = parse_seed_values(args.seeds)
+    base_seed = int(seed_values[0])
+    common.set_random_seed(base_seed, strict_deterministic=bool(args.strict_deterministic))
 
     if len(args.img_size) != 2:
         raise ValueError("--img-size must be two integers: width height")
@@ -415,6 +554,7 @@ def main() -> None:
         )
         common.log(f"Run args: {vars(args)}")
         common.log(f"Selected layers (1-based): {selected_layers}")
+        common.log(f"Selected seeds: {seed_values}")
         config = common.load_seg_config(args.seg_config)
         all_classes = config["ALL_CLASSES"]
         label_colors_list = config["LABEL_COLORS_LIST"]
@@ -436,7 +576,7 @@ def main() -> None:
                 image_paths=image_paths,
                 mask_paths=mask_paths,
                 max_images=args.max_images_per_split,
-                seed=args.seed + split_seed_offset[split_name],
+                seed=base_seed + split_seed_offset[split_name],
             )
             split_pairs[split_name] = (image_paths, mask_paths)
             common.log(f"{split_name}: paired_images={len(image_paths):,}")
@@ -470,15 +610,17 @@ def main() -> None:
         tracker.finish_step("Build/load target caches")
 
         device = common.resolve_device(args.device)
-        summary_rows: List[Dict[str, object]] = []
-        lr_search_results: Dict[str, Dict[str, object]] = {"imagenet": {}, "cag": {}}
-        histories: Dict[str, Dict[int, List[Dict[str, object]]]] = {"imagenet": {}, "cag": {}}
+        raw_summary_rows: List[Dict[str, object]] = []
+        lr_search_results: Dict[str, Dict[str, Dict[str, object]]] = {}
+        total_training_runs = 2 * len(seed_values) * len(selected_layers)
+        completed_probe_run_durations: List[float] = []
 
         for step_label, backbone_name, ckpt_path in [
             ("Run ImageNet layer-wise probes", "imagenet", str(Path(args.imagenet_ckpt).expanduser().resolve())),
             ("Run CAG layer-wise probes", "cag", str(Path(args.cag_ckpt).expanduser().resolve())),
         ]:
             tracker.start_step(step_label)
+            lr_search_results[backbone_name] = {}
             split_cache_paths: Dict[str, Dict[int, Path]] = {}
             for split_name in ["train", "valid", "test"]:
                 split_cache_paths[split_name] = prepare_layer_feature_caches(
@@ -492,59 +634,100 @@ def main() -> None:
                     out_root=out_root,
                     layer_ids=selected_layers,
                 )
-            for idx, layer_id in enumerate(selected_layers, start=1):
+            for seed_idx, seed in enumerate(seed_values, start=1):
+                seed_key = f"seed_{int(seed)}"
+                lr_search_results[backbone_name][seed_key] = {}
                 common.log(
-                    f"[{backbone_name}] Layer-wise probe {idx}/{len(selected_layers)} START | "
-                    f"layer_id={layer_id} block_index={layer_id - 1}"
+                    f"[{backbone_name}] Multi-seed run {seed_idx}/{len(seed_values)} START | seed={seed}"
                 )
-                train_features = load_cached_layer_feature(split_cache_paths["train"][layer_id])
-                valid_features = load_cached_layer_feature(split_cache_paths["valid"][layer_id])
-                test_features = load_cached_layer_feature(split_cache_paths["test"][layer_id])
-                training_key = f"{backbone_name}_layer{layer_id:02d}"
-                model, best_lr, epochs_trained, history, lr_search = common.train_probe_with_lr_search(
-                    backbone_name=training_key,
-                    backbone_ckpt_path=ckpt_path,
-                    train_features=train_features,
-                    train_targets=targets["train"],
-                    valid_features=valid_features,
-                    valid_targets=targets["valid"],
-                    args=args,
-                    out_root=out_root,
-                    full_run_tracker=None,
-                )
-                valid_metrics, _ = common.evaluate_probe_split(
-                    model=model,
-                    backbone_name=backbone_name,
-                    split_name="valid",
-                    features=valid_features,
-                    targets=targets["valid"],
-                    manifest=manifests["valid"],
-                    best_lr=best_lr,
-                    epochs_trained=epochs_trained,
-                    class_names=all_classes,
-                    device=device,
-                    batch_size=int(args.probe_batch_size),
-                )
-                test_metrics, _ = common.evaluate_probe_split(
-                    model=model,
-                    backbone_name=backbone_name,
-                    split_name="test",
-                    features=test_features,
-                    targets=targets["test"],
-                    manifest=manifests["test"],
-                    best_lr=best_lr,
-                    epochs_trained=epochs_trained,
-                    class_names=all_classes,
-                    device=device,
-                    batch_size=int(args.probe_batch_size),
-                )
-                summary_rows.append(metrics_row_with_layer(valid_metrics, layer_id=layer_id))
-                summary_rows.append(metrics_row_with_layer(test_metrics, layer_id=layer_id))
-                histories[backbone_name][layer_id] = history
-                lr_search_results[backbone_name][f"layer_{layer_id:02d}"] = lr_search
-                del train_features, valid_features, test_features, model
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
+                for idx, layer_id in enumerate(selected_layers, start=1):
+                    current_training_run_index = len(completed_probe_run_durations)
+                    training_started_at = time.time()
+
+                    def estimate_future_training(
+                        substep_remaining: float,
+                        *,
+                        current_run_index: int = current_training_run_index,
+                        started_at: float = training_started_at,
+                    ) -> tuple[float, str]:
+                        remaining_runs_after = max(0, total_training_runs - current_run_index - 1)
+                        current_run_total_estimate = max(
+                            float(substep_remaining),
+                            max(0.0, time.time() - started_at) + float(substep_remaining),
+                        )
+                        if completed_probe_run_durations:
+                            avg_training_run = sum(completed_probe_run_durations) / len(
+                                completed_probe_run_durations
+                            )
+                        else:
+                            avg_training_run = current_run_total_estimate
+                        future_training_seconds = remaining_runs_after * avg_training_run
+                        return (
+                            future_training_seconds,
+                            f"future_training_runs={remaining_runs_after} | "
+                            f"avg_training_run~{common.format_duration(avg_training_run)}",
+                        )
+
+                    common.log(
+                        f"[{backbone_name}] Seed {seed} | Layer-wise probe {idx}/{len(selected_layers)} START | "
+                        f"layer_id={layer_id} block_index={layer_id - 1}"
+                    )
+                    train_features = load_cached_layer_feature(split_cache_paths["train"][layer_id])
+                    valid_features = load_cached_layer_feature(split_cache_paths["valid"][layer_id])
+                    test_features = load_cached_layer_feature(split_cache_paths["test"][layer_id])
+                    training_key = f"seed{int(seed)}_{backbone_name}_layer{layer_id:02d}"
+                    effective_seed = int(seed) * 1000 + int(layer_id) * 10 + (0 if backbone_name == "imagenet" else 1)
+                    model, best_lr, epochs_trained, history, lr_search = common.train_probe_with_lr_search(
+                        backbone_name=training_key,
+                        backbone_ckpt_path=ckpt_path,
+                        train_features=train_features,
+                        train_targets=targets["train"],
+                        valid_features=valid_features,
+                        valid_targets=targets["valid"],
+                        args=args,
+                        out_root=out_root,
+                        full_run_tracker=tracker,
+                        future_training_estimator=estimate_future_training,
+                        deterministic_seed=effective_seed,
+                        strict_deterministic=bool(args.strict_deterministic),
+                    )
+                    valid_metrics, _ = common.evaluate_probe_split(
+                        model=model,
+                        backbone_name=backbone_name,
+                        split_name="valid",
+                        features=valid_features,
+                        targets=targets["valid"],
+                        manifest=manifests["valid"],
+                        best_lr=best_lr,
+                        epochs_trained=epochs_trained,
+                        class_names=all_classes,
+                        device=device,
+                        batch_size=int(args.probe_batch_size),
+                    )
+                    test_metrics, _ = common.evaluate_probe_split(
+                        model=model,
+                        backbone_name=backbone_name,
+                        split_name="test",
+                        features=test_features,
+                        targets=targets["test"],
+                        manifest=manifests["test"],
+                        best_lr=best_lr,
+                        epochs_trained=epochs_trained,
+                        class_names=all_classes,
+                        device=device,
+                        batch_size=int(args.probe_batch_size),
+                    )
+                    completed_probe_run_durations.append(max(0.0, time.time() - training_started_at))
+                    raw_summary_rows.append(metrics_row_with_seed_and_layer(valid_metrics, seed=seed, layer_id=layer_id))
+                    raw_summary_rows.append(metrics_row_with_seed_and_layer(test_metrics, seed=seed, layer_id=layer_id))
+                    lr_search_results[backbone_name][seed_key][f"layer_{layer_id:02d}"] = {
+                        **lr_search,
+                        "seed": int(seed),
+                        "effective_seed": int(effective_seed),
+                    }
+                    del train_features, valid_features, test_features, model, history
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
             if not args.keep_feature_caches:
                 cleanup_backbone_feature_caches(
                     out_root=out_root,
@@ -556,10 +739,14 @@ def main() -> None:
             tracker.finish_step(step_label)
 
         tracker.start_step("Save summaries")
-        summary_df = pd.DataFrame(summary_rows).sort_values(["layer_id", "backbone_name", "split"]).reset_index(drop=True)
+        raw_summary_df = pd.DataFrame(raw_summary_rows).sort_values(["seed", "layer_id", "backbone_name", "split"]).reset_index(drop=True)
+        raw_summary_path = out_root / "summary_layerwise_segmentation_linear_probe_raw.csv"
+        raw_summary_df.to_csv(raw_summary_path, index=False)
+        common.log(f"Saved raw summary: {raw_summary_path}")
+        summary_df = build_aggregate_summary(raw_summary_df)
         summary_path = out_root / "summary_layerwise_segmentation_linear_probe.csv"
         summary_df.to_csv(summary_path, index=False)
-        common.log(f"Saved summary: {summary_path}")
+        common.log(f"Saved aggregate summary: {summary_path}")
         lr_path = out_root / "layerwise_lr_search_results.json"
         with open(lr_path, "w", encoding="utf-8") as f:
             json.dump(lr_search_results, f, indent=2)
@@ -567,17 +754,20 @@ def main() -> None:
         tracker.finish_step("Save summaries")
 
         tracker.start_step("Render figures")
-        save_layerwise_curve(summary_df, metric="miou", ylabel="mIoU", title="Layer-wise Test mIoU", output_path=out_root / "fig_layerwise_miou.png")
-        save_layerwise_curve(summary_df, metric="dice", ylabel="Dice", title="Layer-wise Test Dice", output_path=out_root / "fig_layerwise_dice.png")
-        save_delta_figure(summary_df, output_path=out_root / "fig_layerwise_delta_cag_minus_imagenet.png")
-        save_per_class_iou(summary_df, class_names=all_classes, output_path=out_root / "fig_layerwise_per_class_iou.png")
+        delta_df = build_paired_delta_df(raw_summary_df, split="test")
+        save_layerwise_curve(summary_df, metric_prefix="miou", ylabel="mIoU", title="Layer-wise Test mIoU (mean ± std)", output_path=out_root / "fig_layerwise_miou_mean_std.png")
+        save_layerwise_curve(summary_df, metric_prefix="dice", ylabel="Dice", title="Layer-wise Test Dice (mean ± std)", output_path=out_root / "fig_layerwise_dice_mean_std.png")
+        save_delta_figure(delta_df, output_path=out_root / "fig_layerwise_delta_cag_minus_imagenet_mean_std.png")
+        save_per_class_iou(summary_df, class_names=all_classes, output_path=out_root / "fig_layerwise_per_class_iou_mean_std.png")
         tracker.finish_step("Render figures")
 
         tracker.start_step("Write markdown")
         write_markdown_summary(
             output_path=out_root / "analysis_layerwise_segmentation_linear_probe.md",
             summary_df=summary_df,
+            delta_df=delta_df,
             selected_layers=selected_layers,
+            seed_values=seed_values,
         )
         tracker.finish_step("Write markdown")
 
@@ -585,6 +775,9 @@ def main() -> None:
         run_meta = {
             "analysis": "local_2_1_layerwise_segmentation_linear_probe",
             "args": vars(args),
+            "seed_set": list(map(int, seed_values)),
+            "determinism_mode": "strict" if bool(args.strict_deterministic) else "practical_seed_reset",
+            "aggregate_policy": "mean_std_with_paired_delta",
             "selected_layers": list(map(int, selected_layers)),
             "layer_to_block_index": {str(layer_id): int(layer_id - 1) for layer_id in selected_layers},
             "img_size": list(map(int, args.img_size)),
@@ -608,6 +801,8 @@ def main() -> None:
                 for split_name in ["train", "valid", "test"]
             },
             "keep_feature_caches": bool(args.keep_feature_caches),
+            "raw_summary_path": str(raw_summary_path),
+            "aggregate_summary_path": str(summary_path),
         }
         with open(out_root / "run_meta.json", "w", encoding="utf-8") as f:
             json.dump(run_meta, f, indent=2)

@@ -16,12 +16,13 @@ import glob
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, TextIO, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, TextIO, Tuple
 
 import cv2
 import matplotlib.pyplot as plt
@@ -704,6 +705,7 @@ def build_probe_loader(
     batch_size: int,
     shuffle: bool,
     pin_memory: bool,
+    generator: torch.Generator | None = None,
 ) -> DataLoader:
     dataset = CachedSegmentationDataset(features=features, targets=targets)
     return DataLoader(
@@ -713,7 +715,22 @@ def build_probe_loader(
         num_workers=0,
         pin_memory=pin_memory,
         drop_last=False,
+        generator=generator,
     )
+
+
+def set_random_seed(seed: int, strict_deterministic: bool = False) -> None:
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    if strict_deterministic:
+        torch.use_deterministic_algorithms(True)
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
 
 def run_probe_epoch(
@@ -808,6 +825,8 @@ def build_probe_training_signature(
     valid_features: torch.Tensor,
     valid_targets: torch.Tensor,
     args: argparse.Namespace,
+    deterministic_seed: int | None = None,
+    strict_deterministic: bool = False,
 ) -> str:
     payload = {
         "backbone_name": backbone_name,
@@ -828,6 +847,8 @@ def build_probe_training_signature(
         "valid_features_dtype": str(valid_features.dtype),
         "valid_targets_shape": list(valid_targets.shape),
         "valid_targets_dtype": str(valid_targets.dtype),
+        "deterministic_seed": None if deterministic_seed is None else int(deterministic_seed),
+        "strict_deterministic": bool(strict_deterministic),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -869,6 +890,9 @@ def train_probe_with_lr_search(
     args: argparse.Namespace,
     out_root: Path,
     full_run_tracker: ProgressTracker | None = None,
+    future_training_estimator: Callable[[float], float | Tuple[float, str]] | None = None,
+    deterministic_seed: int | None = None,
+    strict_deterministic: bool = False,
 ) -> Tuple[nn.Module, float, int, List[Dict[str, object]], Dict[str, object]]:
     device = resolve_device(args.device)
     num_classes = 2
@@ -878,13 +902,6 @@ def train_probe_with_lr_search(
     pin_memory = device.type == "cuda"
     criterion = nn.CrossEntropyLoss()
 
-    train_loader = build_probe_loader(
-        features=train_features,
-        targets=train_targets,
-        batch_size=int(args.probe_batch_size),
-        shuffle=True,
-        pin_memory=pin_memory,
-    )
     valid_loader = build_probe_loader(
         features=valid_features,
         targets=valid_targets,
@@ -901,6 +918,8 @@ def train_probe_with_lr_search(
         valid_features=valid_features,
         valid_targets=valid_targets,
         args=args,
+        deterministic_seed=deterministic_seed,
+        strict_deterministic=strict_deterministic,
     )
     final_ckpt_path = checkpoint_path_for_backbone(out_root, backbone_name)
     resume_ckpt_path = resume_path_for_backbone(out_root, backbone_name)
@@ -979,6 +998,9 @@ def train_probe_with_lr_search(
             continue
         log(f"[{backbone_name}] LR search start | lr={lr}")
         eta_tracker.start_lr(lr=lr, candidate_index=lr_index)
+        candidate_seed = None if deterministic_seed is None else int(deterministic_seed) + int(lr_index) * 1000
+        if candidate_seed is not None:
+            set_random_seed(candidate_seed, strict_deterministic=strict_deterministic)
         model = instantiate_probe_model(
             in_channels=in_channels,
             output_size=output_size,
@@ -1020,6 +1042,18 @@ def train_probe_with_lr_search(
 
         for epoch in range(start_epoch, int(args.max_epoch) + 1):
             epoch_start = time.time()
+            train_generator = None
+            if candidate_seed is not None:
+                train_generator = torch.Generator()
+                train_generator.manual_seed(candidate_seed + int(epoch))
+            train_loader = build_probe_loader(
+                features=train_features,
+                targets=train_targets,
+                batch_size=int(args.probe_batch_size),
+                shuffle=True,
+                pin_memory=pin_memory,
+                generator=train_generator,
+            )
             train_metrics = run_probe_epoch(
                 model=model,
                 loader=train_loader,
@@ -1061,12 +1095,20 @@ def train_probe_with_lr_search(
             eta_tracker.finish_epoch(epoch=epoch, epoch_seconds=(time.time() - epoch_start))
             if full_run_tracker is not None:
                 substep_remaining = eta_tracker.remaining_total_seconds()
-                current_step_elapsed = full_run_tracker.current_step_elapsed_seconds()
                 short_step_avg = full_run_tracker.average_completed_short_step_seconds(default_seconds=45.0)
                 current_step_tail_overhead = max(short_step_avg, 60.0)
                 future_short_steps = 4 * short_step_avg
                 future_other_training_step = 0.0
-                if backbone_name == "imagenet":
+                future_training_note = ""
+                if future_training_estimator is not None:
+                    estimate = future_training_estimator(substep_remaining)
+                    if isinstance(estimate, tuple):
+                        future_other_training_step = max(0.0, float(estimate[0]))
+                        future_training_note = str(estimate[1]) if len(estimate) > 1 else ""
+                    else:
+                        future_other_training_step = max(0.0, float(estimate))
+                elif backbone_name == "imagenet":
+                    current_step_elapsed = full_run_tracker.current_step_elapsed_seconds()
                     future_other_training_step = max(
                         substep_remaining,
                         current_step_elapsed + substep_remaining,
@@ -1083,6 +1125,7 @@ def train_probe_with_lr_search(
                         f"backbone={backbone_name} | lr={lr} | epoch={epoch}/{int(args.max_epoch)} | "
                         f"substep_remaining~{format_duration(substep_remaining)} | "
                         f"future_training_est~{format_duration(future_other_training_step)}"
+                        f"{' | ' + future_training_note if future_training_note else ''}"
                     ),
                 )
 
