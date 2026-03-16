@@ -7,6 +7,10 @@ tqdm==4.67.1
 torchinfo==1.8.0
 matplotlib==3.10.3
 numpy==2.2.6
+pandas==2.2.3
+PyYAML==6.0.2
+scikit-learn==1.6.1
+umap-learn==0.5.7
 python-dotenv==1.1.1
 seaborn==0.13.2
 pymongo

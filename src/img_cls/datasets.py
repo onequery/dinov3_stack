@@ -53,7 +53,7 @@ def get_datasets(train_dir, valid_dir, resize, center_crop):
     return dataset_train, dataset_valid, dataset_train.classes
 
 
-def get_data_loaders(dataset_train, dataset_valid, batch_size):
+def get_data_loaders(dataset_train, dataset_valid, batch_size, num_workers=NUM_WORKERS):
     """
     Prepares the training and validation data loaders.
 
@@ -62,9 +62,9 @@ def get_data_loaders(dataset_train, dataset_valid, batch_size):
     Returns the training and validation data loaders.
     """
     train_loader = DataLoader(
-        dataset_train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS
+        dataset_train, batch_size=batch_size, shuffle=True, num_workers=num_workers
     )
     valid_loader = DataLoader(
-        dataset_valid, batch_size=batch_size, shuffle=False, num_workers=NUM_WORKERS
+        dataset_valid, batch_size=batch_size, shuffle=False, num_workers=num_workers
     )
     return train_loader, valid_loader
