@@ -7,21 +7,29 @@ matplotlib.style.use('ggplot')
 
 class SaveBestModel:
     """
-    Class to save the best model while training. If the current epoch's 
-    validation loss is less than the previous least less, then save the
-    model state.
+    Save best checkpoint according to a monitored metric.
+    - mode='min': lower is better (e.g. loss)
+    - mode='max': higher is better (e.g. accuracy / macro F1)
     """
-    def __init__(
-        self, best_valid_loss=float('inf')
-    ):
-        self.best_valid_loss = best_valid_loss
+    def __init__(self, mode='min', metric_name='validation loss'):
+        if mode not in {'min', 'max'}:
+            raise ValueError(f"Unsupported mode={mode}. Use 'min' or 'max'.")
+        self.mode = mode
+        self.metric_name = metric_name
+        if self.mode == 'min':
+            self.best_value = float('inf')
+        else:
+            self.best_value = -float('inf')
         
-    def __call__(
-        self, current_valid_loss, epoch, model, out_dir, name
-    ):
-        if current_valid_loss < self.best_valid_loss:
-            self.best_valid_loss = current_valid_loss
-            print(f"\nBest validation loss: {self.best_valid_loss}")
+    def is_better(self, current_value):
+        if self.mode == 'min':
+            return current_value < self.best_value
+        return current_value > self.best_value
+
+    def __call__(self, current_value, epoch, model, out_dir, name):
+        if self.is_better(current_value):
+            self.best_value = current_value
+            print(f"\nBest {self.metric_name}: {self.best_value}")
             print(f"\nSaving best model for epoch: {epoch+1}\n")
             torch.save({
                 'epoch': epoch+1,
@@ -49,7 +57,15 @@ def save_model(epochs, model, optimizer, criterion, out_dir, name):
                 'loss': criterion,
                 }, os.path.join(out_dir, 'head_'+name+'.pth'))
 
-def save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir):
+def save_plots(
+    train_acc,
+    valid_acc,
+    train_loss,
+    valid_loss,
+    out_dir,
+    train_macro_f1=None,
+    valid_macro_f1=None,
+):
     """
     Function to save the loss and accuracy plots to disk.
     """
@@ -82,3 +98,18 @@ def save_plots(train_acc, valid_acc, train_loss, valid_loss, out_dir):
     plt.ylabel('Loss')
     plt.legend()
     plt.savefig(os.path.join(out_dir, 'loss.png'))
+
+    if train_macro_f1 is not None and valid_macro_f1 is not None:
+        plt.figure(figsize=(10, 7))
+        plt.plot(
+            train_macro_f1, color='tab:blue', linestyle='-',
+            label='train macro F1'
+        )
+        plt.plot(
+            valid_macro_f1, color='tab:red', linestyle='-',
+            label='validation macro F1'
+        )
+        plt.xlabel('Epochs')
+        plt.ylabel('Macro F1')
+        plt.legend()
+        plt.savefig(os.path.join(out_dir, 'macro_f1.png'))

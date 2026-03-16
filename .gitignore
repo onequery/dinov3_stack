@@ -11,5 +11,6 @@ outputs/
 src/detection/config_test.py
 
 # private files
-stent_*_filenames.txt
+# stent_*_filenames.txt
 *.log
+tmp/

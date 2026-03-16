@@ -15,11 +15,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import yaml
 from sklearn.metrics import average_precision_score
 from tqdm import tqdm
+
+from train_retrieval import load_backbone_from_local_checkpoint
+from src.utils.lora import inject_lora_into_vit
 
 
 # -----------------------------
@@ -52,16 +56,132 @@ def l2_normalize(x: torch.Tensor) -> torch.Tensor:
     return F.normalize(x, dim=1)
 
 
-def load_dinov3_backbone(
-    repo_dir: str, model_name: str, weights_path: Optional[str]
-) -> torch.nn.Module:
-    if weights_path is not None:
-        model = torch.hub.load(
-            repo_dir, model_name, source="local", weights=weights_path
+class Dinov3Retrieval(nn.Module):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        backbone_embed_dim: int,
+        retrieval_embedding_dim: int = 128,
+        projector_hidden_dim: int | None = None,
+    ):
+        super().__init__()
+        self.backbone = backbone
+        hidden_dim = (
+            int(projector_hidden_dim)
+            if projector_hidden_dim is not None
+            else int(backbone_embed_dim)
         )
+        self.projector = nn.Sequential(
+            nn.Linear(backbone_embed_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, retrieval_embedding_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.backbone(x)
+        z = self.projector(feat)
+        return l2_normalize(z)
+
+
+class BackboneRetrieval(nn.Module):
+    def __init__(self, backbone: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return l2_normalize(self.backbone(x))
+
+
+def infer_projector_hidden_dim(state_dict: Dict[str, torch.Tensor]) -> int:
+    key = "projector.0.weight"
+    if key not in state_dict:
+        raise ValueError(f"Cannot infer projector hidden dim: missing key `{key}`")
+    return int(state_dict[key].shape[0])
+
+
+def infer_lora_rank_from_state_dict(state_dict: Dict[str, torch.Tensor]) -> int | None:
+    ranks = set()
+    for key, value in state_dict.items():
+        if key.startswith("backbone.") and key.endswith(".lora_A"):
+            ranks.add(int(value.shape[0]))
+    if not ranks:
+        return None
+    if len(ranks) != 1:
+        raise ValueError(f"Multiple LoRA ranks detected in checkpoint: {sorted(ranks)}")
+    return list(ranks)[0]
+
+
+def load_retrieval_model(
+    repo_dir: str,
+    model_name: str,
+    weights_path: Optional[str],
+    proj_dim: int,
+) -> Tuple[nn.Module, str, int]:
+    if weights_path is None:
+        backbone = torch.hub.load(repo_dir, model_name, source="local")
+        backbone_embed_dim = backbone.norm.normalized_shape[0]
+        return BackboneRetrieval(backbone), "backbone_only_default", backbone_embed_dim
+
+    if not os.path.isfile(weights_path):
+        raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+    checkpoint = torch.load(weights_path, map_location="cpu")
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        state_dict = checkpoint["model_state_dict"]
     else:
-        model = torch.hub.load(repo_dir, model_name, source="local")
-    return model
+        state_dict = checkpoint
+
+    if not isinstance(state_dict, dict):
+        raise ValueError("Invalid checkpoint format. Expected a state_dict dictionary.")
+
+    has_backbone_prefix = any(k.startswith("backbone.") for k in state_dict.keys())
+    has_projector_prefix = any(k.startswith("projector.") for k in state_dict.keys())
+
+    if has_backbone_prefix and has_projector_prefix:
+        lora_rank = infer_lora_rank_from_state_dict(state_dict)
+        backbone, load_report = load_backbone_from_local_checkpoint(
+            repo_dir=repo_dir,
+            model_name=model_name,
+            weights_path=weights_path,
+            device="cpu",
+        )
+        if lora_rank is not None:
+            inject_lora_into_vit(
+                backbone=backbone,
+                target="attn_qkv_proj",
+                rank=lora_rank,
+                alpha=lora_rank,
+                dropout=0.0,
+                preserve_base_trainability=True,
+            )
+        backbone_embed_dim = backbone.norm.normalized_shape[0]
+        projector_hidden_dim = infer_projector_hidden_dim(state_dict)
+        model = Dinov3Retrieval(
+            backbone,
+            backbone_embed_dim=backbone_embed_dim,
+            retrieval_embedding_dim=proj_dim,
+            projector_hidden_dim=projector_hidden_dim,
+        )
+        model.load_state_dict(state_dict, strict=True)
+        return (
+            model,
+            f"retrieval_with_projector:{load_report['builder']}:lora_rank={lora_rank if lora_rank is not None else 'none'}",
+            backbone_embed_dim,
+        )
+
+    backbone, load_report = load_backbone_from_local_checkpoint(
+        repo_dir=repo_dir,
+        model_name=model_name,
+        weights_path=weights_path,
+        device="cpu",
+    )
+    backbone_embed_dim = backbone.norm.normalized_shape[0]
+    return (
+        BackboneRetrieval(backbone),
+        f"backbone_only:{load_report['builder']}",
+        backbone_embed_dim,
+    )
 
 
 def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compose:
@@ -88,9 +208,10 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--model-name", default="dinov3_vits16")
     parser.add_argument("--repo-dir", default="dinov3")
-    parser.add_argument("--backbone-weights", default=None)
+    parser.add_argument("--weights", default=None)
     parser.add_argument("--out-dir", default="outputs/eval_retrieval/patient_retrieval")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--proj-dim", type=int, default=128)
     parser.add_argument("--k", type=int, nargs="+", default=[1, 5, 10])
     parser.add_argument("--max-topk-log", type=int, default=10)
     args = parser.parse_args()
@@ -107,18 +228,21 @@ def main():
 
     # Collect images
     all_paths = collect_image_paths(args.input)
+    if len(all_paths) == 0:
+        raise ValueError(f"No images found under: {args.input}")
     patient_ids = np.array([extract_patient_id(p) for p in all_paths])
 
     patient_to_indices: Dict[str, np.ndarray] = {
         pid: np.where(patient_ids == pid)[0] for pid in np.unique(patient_ids)
     }
 
-    # Load backbone
-    backbone = load_dinov3_backbone(
-        args.repo_dir, args.model_name, args.backbone_weights
-    ).to(device)
-    backbone.eval()
-    for p in backbone.parameters():
+    # Load retrieval model
+    model, embedding_source, backbone_embed_dim = load_retrieval_model(
+        args.repo_dir, args.model_name, args.weights, args.proj_dim
+    )
+    model = model.to(device)
+    model.eval()
+    for p in model.parameters():
         p.requires_grad = False
 
     # Feature extraction
@@ -132,11 +256,11 @@ def main():
                 img = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
                 batch_imgs.append(transform(img))
             x = torch.stack(batch_imgs).to(device)
-            emb = l2_normalize(backbone(x)).cpu()
+            emb = model(x).cpu()
             feats_list.append(emb)
 
-    features = torch.cat(feats_list, dim=0)
-    n, d = features.shape
+    retrieval_features = torch.cat(feats_list, dim=0)
+    n, retrieval_embedding_dim = retrieval_features.shape
 
     # Retrieval evaluation
     K_LIST = sorted(set(int(k) for k in args.k))
@@ -155,7 +279,7 @@ def main():
         pos_idx = patient_to_indices[pid]
         pos_idx = pos_idx[pos_idx != i]
 
-        sims = torch.mv(features, features[i])
+        sims = torch.mv(retrieval_features, retrieval_features[i])
         sims[i] = -1e9
         sorted_idx = torch.argsort(sims, descending=True)
 
@@ -225,12 +349,13 @@ def main():
         f.write("========== Patient Retrieval Evaluation ==========\n")
         f.write(f"Model: {args.model_name}\n")
         f.write(f"Repo: {args.repo_dir}\n")
-        f.write(
-            f"Weights: {args.backbone_weights if args.backbone_weights else '(torch.hub default)'}\n"
-        )
+        f.write(f"Weights: {args.weights if args.weights else '(torch.hub default)'}\n")
+        f.write(f"Embedding source: {embedding_source}\n")
+        f.write(f"Backbone embed dim: {backbone_embed_dim}\n")
+        f.write(f"Retrieval embedding dim: {retrieval_embedding_dim}\n")
+        f.write(f"Projection dim arg: {args.proj_dim}\n")
         f.write(f"Dataset: {args.input}\n")
         f.write(f"N images: {n}\n")
-        f.write(f"Embedding dim: {d}\n")
         f.write(f"Unique patients: {len(np.unique(patient_ids))}\n")
         f.write(f"Queries with no positives: {num_no_pos}\n\n")
         for k, v in results.items():
@@ -239,16 +364,20 @@ def main():
     pd.DataFrame(per_query_rows).to_csv(per_query_csv, index=False)
 
     # ===== Per-query Retrieval Rank Plot (CDF) =====
-    ranks = np.array(first_positive_ranks)
-    max_rank = int(np.percentile(ranks, 95))
-    xs = np.arange(1, max_rank + 1)
-    ys = [(ranks <= x).mean() for x in xs]
-
     plt.figure(figsize=(8, 6))
-    plt.plot(xs, ys, linewidth=2)
-    plt.xlabel("First Positive Rank")
-    plt.ylabel("Query Ratio (CDF)")
-    plt.title("Per-query Retrieval Rank (CDF)")
+    if len(first_positive_ranks) > 0:
+        ranks = np.array(first_positive_ranks)
+        max_rank = max(1, int(np.percentile(ranks, 95)))
+        xs = np.arange(1, max_rank + 1)
+        ys = [(ranks <= x).mean() for x in xs]
+        plt.plot(xs, ys, linewidth=2)
+        plt.xlabel("First Positive Rank")
+        plt.ylabel("Query Ratio (CDF)")
+        plt.title("Per-query Retrieval Rank (CDF)")
+    else:
+        plt.text(0.5, 0.5, "No positive pairs found", ha="center", va="center")
+        plt.axis("off")
+        plt.title("Per-query Retrieval Rank (CDF)")
     plt.grid(alpha=0.3)
     plt.tight_layout()
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from datetime import datetime
 
 from contextlib import nullcontext
 from tqdm import tqdm
@@ -7,6 +8,12 @@ from typing import List, Optional
 
 from src.img_seg.utils import draw_translucent_seg_maps
 from src.img_seg.metrics import IOUEval
+
+
+def log_with_time(message: str):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
 
 def _run_one_epoch(
     model: nn.Module,
@@ -97,7 +104,7 @@ def train(
     criterion: nn.Module,
     classes_to_train: List[str]
 ):
-    print('Training')
+    log_with_time("Training")
     return _run_one_epoch(
         model=model,
         dataloader=train_dataloader,
@@ -119,7 +126,7 @@ def validate(
     save_dir: str,
     viz_map: List
 ):
-    print('Validating')
+    log_with_time("Validating")
     return _run_one_epoch(
         model=model,
         dataloader=valid_dataloader,

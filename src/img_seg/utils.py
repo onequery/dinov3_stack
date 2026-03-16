@@ -61,9 +61,9 @@ def draw_translucent_seg_maps(
     """
     IMG_MEAN = [0.485, 0.456, 0.406]
     IMG_STD = [0.229, 0.224, 0.225]
-    alpha = 1 # how much transparency
-    beta = 0.8 # alpha + beta should be 1
-    gamma = 0 # contrast
+    alpha = 0.65
+    beta = 0.35
+    gamma = 0
 
     seg_map = output[0] # use only one output from the batch
     seg_map = torch.argmax(seg_map.squeeze(), dim=0).detach().cpu().numpy()
@@ -91,8 +91,10 @@ def draw_translucent_seg_maps(
     # cv2.imshow('image', image)
     # cv2.waitKey(0)
 
-    cv2.addWeighted(image, alpha, rgb, beta, gamma, image)
-    cv2.imwrite(f"{val_seg_dir}/e{epoch}_b{i}.jpg", image)
+    blended = cv2.addWeighted(image, alpha, rgb, beta, gamma)
+    foreground_mask = seg_map != 0
+    image[foreground_mask] = blended[foreground_mask]
+    cv2.imwrite(f"{val_seg_dir}/e{epoch}_b{i}.jpg", np.clip(image, 0, 255).astype(np.uint8))
 
 class SaveBestModel:
     """
@@ -216,7 +218,7 @@ def save_plots(
 # Define the torchvision image transforms
 def infer_transform(img_size):
     transform = A.Compose([
-        A.Resize(img_size[1], img_size[0], always_apply=True),
+        A.Resize(img_size[1], img_size[0]),
         A.Normalize(
             mean=[0.485, 0.456, 0.406],
             std=[0.229, 0.224, 0.225],
