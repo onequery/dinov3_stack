@@ -335,8 +335,22 @@ def build_paired_delta_df(raw_df: pd.DataFrame, split: str = "test") -> pd.DataF
     return pd.DataFrame(rows).sort_values(["layer_id", "seed"]).reset_index(drop=True)
 
 
-def save_layerwise_curve(summary_df: pd.DataFrame, metric_prefix: str, ylabel: str, title: str, output_path: Path) -> None:
+def _seed_offsets(num_points: int, width: float = 0.12) -> np.ndarray:
+    if num_points <= 1:
+        return np.asarray([0.0], dtype=np.float64)
+    return np.linspace(-width, width, num_points, dtype=np.float64)
+
+
+def save_layerwise_curve(
+    summary_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    metric_prefix: str,
+    ylabel: str,
+    title: str,
+    output_path: Path,
+) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy()
+    raw_test_df = raw_df[raw_df["split"] == "test"].copy()
     fig, ax = plt.subplots(figsize=(8.6, 4.8))
     for backbone_name, label in [("imagenet", "ImageNet"), ("cag", "CAG")]:
         sub = test_df[test_df["backbone_name"] == backbone_name].sort_values("layer_id")
@@ -358,6 +372,23 @@ def save_layerwise_curve(summary_df: pd.DataFrame, metric_prefix: str, ylabel: s
             alpha=0.18,
             linewidth=0.0,
         )
+        raw_sub = raw_test_df[raw_test_df["backbone_name"] == backbone_name].copy()
+        if not raw_sub.empty:
+            seed_order = sorted(raw_sub["seed"].unique().tolist())
+            offsets = _seed_offsets(len(seed_order))
+            seed_to_offset = {int(seed): float(offsets[idx]) for idx, seed in enumerate(seed_order)}
+            xs = raw_sub["layer_id"].to_numpy(dtype=float) + raw_sub["seed"].map(seed_to_offset).to_numpy(dtype=float)
+            ys = raw_sub[metric_prefix].to_numpy(dtype=float)
+            ax.scatter(
+                xs,
+                ys,
+                s=26,
+                alpha=0.7,
+                color=PLOT_COLORS[backbone_name],
+                edgecolors="white",
+                linewidths=0.4,
+                zorder=3,
+            )
     ax.set_xlabel("Layer")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -395,6 +426,31 @@ def save_delta_figure(delta_df: pd.DataFrame, output_path: Path) -> None:
         alpha=0.18,
         linewidth=0.0,
     )
+    if not delta_df.empty:
+        seed_order = sorted(delta_df["seed"].unique().tolist())
+        offsets = _seed_offsets(len(seed_order))
+        seed_to_offset = {int(seed): float(offsets[idx]) for idx, seed in enumerate(seed_order)}
+        xs = delta_df["layer_id"].to_numpy(dtype=float) + delta_df["seed"].map(seed_to_offset).to_numpy(dtype=float)
+        axes[0].scatter(
+            xs,
+            delta_df["miou_delta"].to_numpy(dtype=float),
+            s=26,
+            alpha=0.7,
+            color="#C44E52",
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=3,
+        )
+        axes[1].scatter(
+            xs,
+            delta_df["dice_delta"].to_numpy(dtype=float),
+            s=26,
+            alpha=0.7,
+            color="#55A868",
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=3,
+        )
     for ax, ylabel in zip(axes, ["Paired Delta mIoU (CAG-ImageNet)", "Paired Delta Dice (CAG-ImageNet)"]):
         ax.axhline(0.0, color="#444444", linewidth=1.0, linestyle="--")
         ax.set_xlabel("Layer")
@@ -407,10 +463,17 @@ def save_delta_figure(delta_df: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
-def save_per_class_iou(summary_df: pd.DataFrame, class_names: Sequence[str], output_path: Path) -> None:
+def save_per_class_iou(
+    summary_df: pd.DataFrame,
+    raw_df: pd.DataFrame,
+    class_names: Sequence[str],
+    output_path: Path,
+) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy().copy()
+    raw_test_df = raw_df[raw_df["split"] == "test"].copy()
     test_df["per_class_iou_mean_list"] = test_df["per_class_iou_mean"].apply(json.loads)
     test_df["per_class_iou_std_list"] = test_df["per_class_iou_std"].apply(json.loads)
+    raw_test_df["per_class_iou_list"] = raw_test_df["per_class_iou"].apply(json.loads)
     fig, axes = plt.subplots(1, len(class_names), figsize=(5.4 * len(class_names), 4.8), sharex=True)
     if len(class_names) == 1:
         axes = [axes]
@@ -430,6 +493,26 @@ def save_per_class_iou(summary_df: pd.DataFrame, class_names: Sequence[str], out
                 alpha=0.18,
                 linewidth=0.0,
             )
+            raw_sub = raw_test_df[raw_test_df["backbone_name"] == backbone_name].copy()
+            if not raw_sub.empty:
+                seed_order = sorted(raw_sub["seed"].unique().tolist())
+                offsets = _seed_offsets(len(seed_order))
+                seed_to_offset = {int(seed): float(offsets[idx]) for idx, seed in enumerate(seed_order)}
+                raw_xs = raw_sub["layer_id"].to_numpy(dtype=float) + raw_sub["seed"].map(seed_to_offset).to_numpy(dtype=float)
+                raw_ys = np.asarray(
+                    [float(values[class_idx]) for values in raw_sub["per_class_iou_list"]],
+                    dtype=np.float64,
+                )
+                ax.scatter(
+                    raw_xs,
+                    raw_ys,
+                    s=26,
+                    alpha=0.7,
+                    color=PLOT_COLORS[backbone_name],
+                    edgecolors="white",
+                    linewidths=0.4,
+                    zorder=3,
+                )
         ax.set_title(f"IoU: {class_name}")
         ax.set_xlabel("Layer")
         ax.set_ylabel("IoU")
@@ -755,10 +838,10 @@ def main() -> None:
 
         tracker.start_step("Render figures")
         delta_df = build_paired_delta_df(raw_summary_df, split="test")
-        save_layerwise_curve(summary_df, metric_prefix="miou", ylabel="mIoU", title="Layer-wise Test mIoU (mean ± std)", output_path=out_root / "fig_layerwise_miou_mean_std.png")
-        save_layerwise_curve(summary_df, metric_prefix="dice", ylabel="Dice", title="Layer-wise Test Dice (mean ± std)", output_path=out_root / "fig_layerwise_dice_mean_std.png")
+        save_layerwise_curve(summary_df, raw_summary_df, metric_prefix="miou", ylabel="mIoU", title="Layer-wise Test mIoU (mean ± std)", output_path=out_root / "fig_layerwise_miou_mean_std.png")
+        save_layerwise_curve(summary_df, raw_summary_df, metric_prefix="dice", ylabel="Dice", title="Layer-wise Test Dice (mean ± std)", output_path=out_root / "fig_layerwise_dice_mean_std.png")
         save_delta_figure(delta_df, output_path=out_root / "fig_layerwise_delta_cag_minus_imagenet_mean_std.png")
-        save_per_class_iou(summary_df, class_names=all_classes, output_path=out_root / "fig_layerwise_per_class_iou_mean_std.png")
+        save_per_class_iou(summary_df, raw_summary_df, class_names=all_classes, output_path=out_root / "fig_layerwise_per_class_iou_mean_std.png")
         tracker.finish_step("Render figures")
 
         tracker.start_step("Write markdown")
