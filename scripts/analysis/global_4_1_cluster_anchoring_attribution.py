@@ -15,6 +15,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 import warnings
@@ -48,35 +49,33 @@ TARGETS = ["patient", "study"]
 KNN_K_DEFAULT = [5, 10, 20]
 KMEANS_K_DEFAULT = [8, 12, 16]
 REFERENCE_FIELDS = ["patient_id", "study_id"]
-CATEGORICAL_CANDIDATES = [
-    ("Manufacturer", "metadata"),
-    ("ManufacturerModelName", "metadata"),
-    ("StationName", "metadata"),
-    ("ProtocolName", "metadata"),
-    ("Rows", "metadata"),
-    ("Columns", "metadata"),
-    ("primary_angle_bin_10deg", "derived"),
-    ("secondary_angle_bin_10deg", "derived"),
-    ("view_bin_2d_10deg", "derived"),
-]
-CONTINUOUS_CANDIDATES = [
-    ("PositionerPrimaryAngle", "metadata"),
-    ("PositionerSecondaryAngle", "metadata"),
-    ("KVP", "metadata"),
-    ("FrameTime", "metadata"),
-    ("DistanceSourceToDetector", "metadata"),
-    ("primary_angle_abs", "derived"),
-    ("secondary_angle_abs", "derived"),
-    ("intensity_mean", "image"),
-    ("intensity_std", "image"),
-    ("intensity_p10", "image"),
-    ("intensity_p90", "image"),
-    ("dynamic_range_p90_p10", "image"),
-    ("entropy", "image"),
-    ("laplacian_variance", "image"),
-    ("gradient_mean", "image"),
-]
 DTYPE_ORDER = {"categorical": 0, "continuous": 1}
+FIELD_NAME_RE = re.compile(r"[^0-9A-Za-z]+")
+NUMERIC_VRS = {"DS", "FD", "FL", "IS", "SL", "SS", "SV", "UL", "US", "UV"}
+DATE_VRS = {"DA"}
+TIME_VRS = {"TM"}
+DATETIME_VRS = {"DT"}
+STRING_VRS = {
+    "AE",
+    "AS",
+    "AT",
+    "CS",
+    "LO",
+    "LT",
+    "PN",
+    "SH",
+    "ST",
+    "UC",
+    "UI",
+    "UR",
+    "UT",
+}
+MIN_CATEGORICAL_COVERAGE = 0.50
+MAX_CATEGORICAL_UNIQUE = 200
+MAX_CATEGORICAL_DOMINANT_SHARE = 0.995
+MIN_CONTINUOUS_COVERAGE = 0.50
+MIN_CONTINUOUS_UNIQUE = 5
+MAX_STRING_LENGTH = 160
 
 
 @dataclass(frozen=True)
@@ -92,6 +91,14 @@ class JobDef:
         if self.kind == "postprocess":
             return self.name or "postprocess"
         return f"probe/{self.backbone_name}/{self.target}/seed{self.seed}"
+
+
+@dataclass(frozen=True)
+class FieldSpec:
+    field_name: str
+    field_type: str
+    field_group: str
+    source: str
 
 
 class TeeStream:
@@ -347,10 +354,31 @@ def quantize_angle(value: float | int | None, step: float = 10.0) -> str | None:
     return f"{int(round(float(value) / step) * step):+d}"
 
 
+def sanitize_field_name(name: str) -> str:
+    text = FIELD_NAME_RE.sub("", str(name))
+    if not text:
+        text = "UnnamedField"
+    if text[0].isdigit():
+        text = f"Field{text}"
+    return text
+
+
+def register_field(field_specs: Dict[str, FieldSpec], field_name: str, field_type: str, field_group: str, source: str) -> None:
+    spec = FieldSpec(field_name=field_name, field_type=field_type, field_group=field_group, source=source)
+    existing = field_specs.get(field_name)
+    if existing is None:
+        field_specs[field_name] = spec
+        return
+    if existing != spec:
+        raise ValueError(f"Field spec conflict for {field_name}: {existing} vs {spec}")
+
+
 def clean_categorical(value: object) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
+    if len(text) > MAX_STRING_LENGTH:
+        text = text[:MAX_STRING_LENGTH]
     if text == "" or text.lower() == "none" or text.lower() == "nan":
         return None
     return text
@@ -368,21 +396,150 @@ def clean_numeric(value: object) -> float | None:
     return float(v)
 
 
-def read_dicom_fields(dcm_path: Path) -> Dict[str, object]:
-    ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True)
-    return {
-        "Manufacturer": clean_categorical(ds.get("Manufacturer")),
-        "ManufacturerModelName": clean_categorical(ds.get("ManufacturerModelName")),
-        "StationName": clean_categorical(ds.get("StationName")),
-        "ProtocolName": clean_categorical(ds.get("ProtocolName")),
-        "Rows": clean_categorical(ds.get("Rows")),
-        "Columns": clean_categorical(ds.get("Columns")),
-        "PositionerPrimaryAngle": clean_numeric(ds.get("PositionerPrimaryAngle")),
-        "PositionerSecondaryAngle": clean_numeric(ds.get("PositionerSecondaryAngle")),
-        "KVP": clean_numeric(ds.get("KVP")),
-        "FrameTime": clean_numeric(ds.get("FrameTime")),
-        "DistanceSourceToDetector": clean_numeric(ds.get("DistanceSourceToDetector")),
+def maybe_iterable_value(value: object) -> List[object] | None:
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if hasattr(value, "__iter__") and not isinstance(value, (str, bytes, bytearray)):
+        try:
+            seq = list(value)
+        except TypeError:
+            return None
+        return seq
+    return None
+
+
+def normalize_dicom_keyword(elem: pydicom.dataelem.DataElement) -> str:
+    keyword = elem.keyword or sanitize_field_name(elem.name)
+    return sanitize_field_name(keyword)
+
+
+def parse_dicom_date(text: str) -> Tuple[int, int, int] | None:
+    digits = "".join(ch for ch in str(text) if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    year = int(digits[:4])
+    month = int(digits[4:6])
+    day = int(digits[6:8])
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return year, month, day
+
+
+def parse_dicom_time(text: str) -> Tuple[int, int, int] | None:
+    digits = "".join(ch for ch in str(text) if ch.isdigit())
+    if len(digits) < 2:
+        return None
+    hour = int(digits[:2])
+    minute = int(digits[2:4]) if len(digits) >= 4 else 0
+    second = int(digits[4:6]) if len(digits) >= 6 else 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+        return None
+    return hour, minute, second
+
+
+def add_temporal_derivatives(
+    values: Dict[str, object],
+    field_specs: Dict[str, FieldSpec],
+    keyword: str,
+    vr: str,
+    raw_text: str,
+) -> None:
+    if vr in DATE_VRS or vr in DATETIME_VRS:
+        parsed_date = parse_dicom_date(raw_text)
+        if parsed_date is not None:
+            year, month, day = parsed_date
+            derived = {
+                f"{keyword}Year": str(year),
+                f"{keyword}Month": f"{month:02d}",
+                f"{keyword}Day": f"{day:02d}",
+                f"{keyword}YearMonth": f"{year:04d}-{month:02d}",
+            }
+            for name, val in derived.items():
+                values[name] = val
+                register_field(field_specs, name, "categorical", "derived", f"{keyword}_temporal")
+    if vr in TIME_VRS or vr in DATETIME_VRS:
+        parsed_time = parse_dicom_time(raw_text)
+        if parsed_time is not None:
+            hour, minute, _second = parsed_time
+            minute10 = int(minute // 10) * 10
+            derived = {
+                f"{keyword}Hour": f"{hour:02d}",
+                f"{keyword}Minute10Bin": f"{minute10:02d}",
+            }
+            for name, val in derived.items():
+                values[name] = val
+                register_field(field_specs, name, "categorical", "derived", f"{keyword}_temporal")
+
+
+def add_numeric_multivalue_derivatives(
+    values: Dict[str, object],
+    field_specs: Dict[str, FieldSpec],
+    keyword: str,
+    numeric_values: Sequence[float],
+) -> None:
+    arr = np.asarray(list(numeric_values), dtype=np.float64)
+    if arr.size == 0:
+        return
+    derived = {
+        f"{keyword}MultiMean": float(arr.mean()),
+        f"{keyword}MultiMin": float(arr.min()),
+        f"{keyword}MultiMax": float(arr.max()),
+        f"{keyword}MultiSpan": float(arr.max() - arr.min()),
+        f"{keyword}MultiCount": float(arr.size),
     }
+    for name, val in derived.items():
+        values[name] = val
+        register_field(field_specs, name, "continuous", "derived", f"{keyword}_multivalue")
+
+
+def extract_dicom_scalar_fields(dcm_path: Path) -> Tuple[Dict[str, object], Dict[str, FieldSpec]]:
+    ds = pydicom.dcmread(str(dcm_path), stop_before_pixels=True)
+    values: Dict[str, object] = {}
+    field_specs: Dict[str, FieldSpec] = {}
+    for elem in ds:
+        if elem.VR == "SQ" or elem.tag.is_private:
+            continue
+        keyword = normalize_dicom_keyword(elem)
+        if keyword in {"PixelData"}:
+            continue
+        raw_value = elem.value
+        if isinstance(raw_value, (bytes, bytearray)):
+            continue
+        seq = maybe_iterable_value(raw_value)
+        if seq is not None and len(seq) == 0:
+            continue
+        if seq is not None and not isinstance(raw_value, (str, bytes, bytearray)):
+            numeric_values = [clean_numeric(v) for v in seq]
+            if all(v is not None for v in numeric_values):
+                joined = clean_categorical("\\".join(str(v) for v in seq))
+                if joined is not None:
+                    values[keyword] = joined
+                    register_field(field_specs, keyword, "categorical", "metadata", "dicom_scalar")
+                add_numeric_multivalue_derivatives(values, field_specs, keyword, [float(v) for v in numeric_values if v is not None])
+                continue
+            joined = clean_categorical("\\".join(str(v) for v in seq))
+            if joined is not None:
+                values[keyword] = joined
+                register_field(field_specs, keyword, "categorical", "metadata", "dicom_scalar")
+            continue
+
+        if elem.VR in NUMERIC_VRS:
+            numeric = clean_numeric(raw_value)
+            if numeric is None:
+                continue
+            values[keyword] = numeric
+            register_field(field_specs, keyword, "continuous", "metadata", "dicom_scalar")
+            continue
+
+        cat = clean_categorical(raw_value)
+        if cat is None:
+            continue
+        values[keyword] = cat
+        register_field(field_specs, keyword, "categorical", "metadata", "dicom_scalar")
+        if elem.VR in DATE_VRS | TIME_VRS | DATETIME_VRS:
+            add_temporal_derivatives(values, field_specs, keyword, elem.VR, cat)
+
+    return values, field_specs
 
 
 def compute_entropy_from_image(img: np.ndarray) -> float:
@@ -403,17 +560,51 @@ def compute_image_attributes(img_path: Path) -> Dict[str, float]:
     gx = cv2.Sobel(img_f, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(img_f, cv2.CV_32F, 0, 1, ksize=3)
     grad_mag = np.sqrt(gx * gx + gy * gy)
+    canny = cv2.Canny(img, 100, 200)
+    mean = float(img_f.mean())
+    std = float(img_f.std(ddof=0))
     p10 = float(np.percentile(img_f, 10.0))
     p90 = float(np.percentile(img_f, 90.0))
+    p01 = float(np.percentile(img_f, 1.0))
+    p05 = float(np.percentile(img_f, 5.0))
+    p25 = float(np.percentile(img_f, 25.0))
+    p50 = float(np.percentile(img_f, 50.0))
+    p75 = float(np.percentile(img_f, 75.0))
+    p95 = float(np.percentile(img_f, 95.0))
+    p99 = float(np.percentile(img_f, 99.0))
+    centered = img_f - mean
+    if std > 0.0:
+        skewness = float(np.mean((centered / std) ** 3))
+        kurtosis = float(np.mean((centered / std) ** 4) - 3.0)
+    else:
+        skewness = 0.0
+        kurtosis = 0.0
     return {
-        "intensity_mean": float(img_f.mean()),
-        "intensity_std": float(img_f.std(ddof=0)),
+        "intensity_mean": mean,
+        "intensity_std": std,
+        "intensity_min": float(img_f.min()),
+        "intensity_max": float(img_f.max()),
+        "intensity_median": p50,
+        "intensity_p01": p01,
+        "intensity_p05": p05,
         "intensity_p10": p10,
+        "intensity_p25": p25,
         "intensity_p90": p90,
+        "intensity_p95": p95,
+        "intensity_p99": p99,
+        "intensity_p75": p75,
         "dynamic_range_p90_p10": float(p90 - p10),
+        "dynamic_range_p95_p05": float(p95 - p05),
+        "dynamic_range_p99_p01": float(p99 - p01),
+        "dynamic_range_max_min": float(img_f.max() - img_f.min()),
         "entropy": compute_entropy_from_image(img),
         "laplacian_variance": float(lap.var()),
+        "laplacian_abs_mean": float(np.abs(lap).mean()),
         "gradient_mean": float(grad_mag.mean()),
+        "gradient_std": float(grad_mag.std(ddof=0)),
+        "edge_density_canny": float((canny > 0).mean()),
+        "intensity_skewness": skewness,
+        "intensity_kurtosis": kurtosis,
     }
 
 
@@ -424,21 +615,51 @@ def build_anchor_manifest(
     output_root: Path,
     max_images: int | None,
     seed: int,
-) -> Tuple[pd.DataFrame, str]:
+) -> Tuple[pd.DataFrame, str, pd.DataFrame]:
     base_manifest = load_csv(global2_root / "image_manifest_test.csv")
     full_manifest_hash = hash_dataframe(base_manifest, ["image_id", "img_path", "patient_id", "study_id"])
     manifest = maybe_subsample_manifest(base_manifest, max_images, seed)
     rows: List[Dict[str, object]] = []
+    field_specs: Dict[str, FieldSpec] = {}
     for _, row in manifest.iterrows():
         img_path = Path(str(row["img_path"])).resolve()
         rel = img_path.relative_to(image_root.resolve())
         dcm_path = dcm_root.resolve() / rel.with_suffix(".dcm")
         if not dcm_path.exists():
             raise FileNotFoundError(f"Missing DICOM for image: {img_path}")
-        meta = read_dicom_fields(dcm_path)
+        meta, dicom_specs = extract_dicom_scalar_fields(dcm_path)
+        for spec in dicom_specs.values():
+            register_field(field_specs, spec.field_name, spec.field_type, spec.field_group, spec.source)
         image_stats = compute_image_attributes(img_path)
-        primary = meta["PositionerPrimaryAngle"]
-        secondary = meta["PositionerSecondaryAngle"]
+        for image_field in image_stats:
+            register_field(field_specs, image_field, "continuous", "image", "image_stats")
+        primary = clean_numeric(meta.get("PositionerPrimaryAngle"))
+        secondary = clean_numeric(meta.get("PositionerSecondaryAngle"))
+        derived_values = {
+            "primary_angle_bin_10deg": quantize_angle(primary, 10.0),
+            "secondary_angle_bin_10deg": quantize_angle(secondary, 10.0),
+            "view_bin_2d_10deg": None
+            if primary is None or secondary is None
+            else f"({quantize_angle(primary, 10.0)},{quantize_angle(secondary, 10.0)})",
+            "primary_angle_bin_20deg": quantize_angle(primary, 20.0),
+            "secondary_angle_bin_20deg": quantize_angle(secondary, 20.0),
+            "view_bin_2d_20deg": None
+            if primary is None or secondary is None
+            else f"({quantize_angle(primary, 20.0)},{quantize_angle(secondary, 20.0)})",
+            "primary_angle_abs": None if primary is None else abs(float(primary)),
+            "secondary_angle_abs": None if secondary is None else abs(float(secondary)),
+        }
+        for name in [
+            "primary_angle_bin_10deg",
+            "secondary_angle_bin_10deg",
+            "view_bin_2d_10deg",
+            "primary_angle_bin_20deg",
+            "secondary_angle_bin_20deg",
+            "view_bin_2d_20deg",
+        ]:
+            register_field(field_specs, name, "categorical", "derived", "angle_derived")
+        for name in ["primary_angle_abs", "secondary_angle_abs"]:
+            register_field(field_specs, name, "continuous", "derived", "angle_derived")
         combined = {
             "image_id": int(row["image_id"]),
             "img_path": str(img_path),
@@ -446,13 +667,7 @@ def build_anchor_manifest(
             "study_id": str(row["study_id"]),
             "class_name": str(row.get("class_name", "")),
             **meta,
-            "primary_angle_bin_10deg": quantize_angle(primary, 10.0),
-            "secondary_angle_bin_10deg": quantize_angle(secondary, 10.0),
-            "view_bin_2d_10deg": None
-            if primary is None or secondary is None
-            else f"({quantize_angle(primary, 10.0)},{quantize_angle(secondary, 10.0)})",
-            "primary_angle_abs": None if primary is None else abs(float(primary)),
-            "secondary_angle_abs": None if secondary is None else abs(float(secondary)),
+            **derived_values,
             **image_stats,
         }
         rows.append(combined)
@@ -461,44 +676,62 @@ def build_anchor_manifest(
         raise RuntimeError("Duplicate image_id detected in anchor manifest.")
     out_df = out_df.sort_values("image_id").reset_index(drop=True)
     out_df.to_csv(output_root / "test_manifest_with_anchor_features.csv", index=False)
-    return out_df, full_manifest_hash
+    field_specs_df = pd.DataFrame([spec.__dict__ for spec in field_specs.values()]).sort_values(
+        ["field_group", "field_type", "field_name"]
+    ).reset_index(drop=True)
+    field_specs_df.to_csv(output_root / "summary_global_4_1_field_catalog.csv", index=False)
+    return out_df, full_manifest_hash, field_specs_df
 
 
-def audit_fields(manifest: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[str]]:
+def audit_fields(manifest: pd.DataFrame, field_specs_df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[str]]:
     rows: List[Dict[str, object]] = []
     usable_categorical: List[str] = []
     usable_continuous: List[str] = []
     n = len(manifest)
-    for field_name, source in CATEGORICAL_CANDIDATES:
-        series = manifest[field_name].astype(object)
-        valid = series.notna() & (series.astype(str) != "")
-        coverage = float(valid.mean()) if n else float("nan")
-        valid_values = series[valid].astype(str)
-        unique_count = int(valid_values.nunique()) if valid.any() else 0
-        dominant_share = float(valid_values.value_counts(normalize=True).iloc[0]) if unique_count else float("nan")
-        usable = coverage >= 0.95 and 2 <= unique_count <= 40 and (not math.isfinite(dominant_share) or dominant_share < 0.95)
-        if usable:
-            usable_categorical.append(field_name)
-        rows.append(
-            {
-                "field_name": field_name,
-                "field_type": "categorical",
-                "field_group": source,
-                "coverage": coverage,
-                "unique_count": unique_count,
-                "dominant_share": dominant_share,
-                "std": "",
-                "usable": int(usable),
-                "drop_reason": "" if usable else _categorical_drop_reason(coverage, unique_count, dominant_share),
-            }
-        )
-    for field_name, source in CONTINUOUS_CANDIDATES:
+    for spec in field_specs_df.itertuples():
+        field_name = str(spec.field_name)
+        source = str(spec.field_group)
+        field_type = str(spec.field_type)
+        if field_name not in manifest.columns:
+            continue
+        if field_name in REFERENCE_FIELDS:
+            continue
+        if field_type == "categorical":
+            series = manifest[field_name].astype(object)
+            valid = series.notna() & (series.astype(str) != "")
+            coverage = float(valid.mean()) if n else float("nan")
+            valid_values = series[valid].astype(str)
+            unique_count = int(valid_values.nunique()) if valid.any() else 0
+            dominant_share = float(valid_values.value_counts(normalize=True).iloc[0]) if unique_count else float("nan")
+            usable = (
+                coverage >= MIN_CATEGORICAL_COVERAGE
+                and 2 <= unique_count <= MAX_CATEGORICAL_UNIQUE
+                and (not math.isfinite(dominant_share) or dominant_share < MAX_CATEGORICAL_DOMINANT_SHARE)
+            )
+            if usable:
+                usable_categorical.append(field_name)
+            rows.append(
+                {
+                    "field_name": field_name,
+                    "field_type": "categorical",
+                    "field_group": source,
+                    "source": str(spec.source),
+                    "coverage": coverage,
+                    "unique_count": unique_count,
+                    "dominant_share": dominant_share,
+                    "std": "",
+                    "usable": int(usable),
+                    "drop_reason": "" if usable else _categorical_drop_reason(coverage, unique_count, dominant_share),
+                }
+            )
+            continue
+
         values = pd.to_numeric(manifest[field_name], errors="coerce")
         valid = values.notna()
         coverage = float(valid.mean()) if n else float("nan")
         unique_count = int(values[valid].nunique()) if valid.any() else 0
         std = float(values[valid].std(ddof=0)) if valid.any() else float("nan")
-        usable = coverage >= 0.95 and unique_count >= 10 and math.isfinite(std) and std > 0.0
+        usable = coverage >= MIN_CONTINUOUS_COVERAGE and unique_count >= MIN_CONTINUOUS_UNIQUE and math.isfinite(std) and std > 0.0
         if usable:
             usable_continuous.append(field_name)
         rows.append(
@@ -506,6 +739,7 @@ def audit_fields(manifest: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[
                 "field_name": field_name,
                 "field_type": "continuous",
                 "field_group": source,
+                "source": str(spec.source),
                 "coverage": coverage,
                 "unique_count": unique_count,
                 "dominant_share": "",
@@ -520,23 +754,23 @@ def audit_fields(manifest: pd.DataFrame) -> Tuple[pd.DataFrame, List[str], List[
 
 def _categorical_drop_reason(coverage: float, unique_count: int, dominant_share: float) -> str:
     reasons: List[str] = []
-    if not math.isfinite(coverage) or coverage < 0.95:
-        reasons.append("coverage<0.95")
+    if not math.isfinite(coverage) or coverage < MIN_CATEGORICAL_COVERAGE:
+        reasons.append(f"coverage<{MIN_CATEGORICAL_COVERAGE:.2f}")
     if unique_count < 2:
         reasons.append("unique<2")
-    if unique_count > 40:
-        reasons.append("unique>40")
-    if math.isfinite(dominant_share) and dominant_share >= 0.95:
-        reasons.append("dominant>=0.95")
+    if unique_count > MAX_CATEGORICAL_UNIQUE:
+        reasons.append(f"unique>{MAX_CATEGORICAL_UNIQUE}")
+    if math.isfinite(dominant_share) and dominant_share >= MAX_CATEGORICAL_DOMINANT_SHARE:
+        reasons.append(f"dominant>={MAX_CATEGORICAL_DOMINANT_SHARE:.3f}")
     return ",".join(reasons) if reasons else "unknown"
 
 
 def _continuous_drop_reason(coverage: float, unique_count: int, std: float) -> str:
     reasons: List[str] = []
-    if not math.isfinite(coverage) or coverage < 0.95:
-        reasons.append("coverage<0.95")
-    if unique_count < 10:
-        reasons.append("unique<10")
+    if not math.isfinite(coverage) or coverage < MIN_CONTINUOUS_COVERAGE:
+        reasons.append(f"coverage<{MIN_CONTINUOUS_COVERAGE:.2f}")
+    if unique_count < MIN_CONTINUOUS_UNIQUE:
+        reasons.append(f"unique<{MIN_CONTINUOUS_UNIQUE}")
     if not math.isfinite(std) or std <= 0.0:
         reasons.append("std<=0")
     return ",".join(reasons) if reasons else "unknown"
@@ -859,7 +1093,13 @@ def aggregate_rows(raw_df: pd.DataFrame, group_cols: Sequence[str], metric_cols:
 
 
 def save_field_audit_figure(audit_df: pd.DataFrame, output_path: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    max_rows = max(
+        int((audit_df["field_type"] == "categorical").sum()),
+        int((audit_df["field_type"] == "continuous").sum()),
+        1,
+    )
+    fig_height = max(6.0, min(0.25 * max_rows + 2.0, 30.0))
+    fig, axes = plt.subplots(1, 2, figsize=(16, fig_height))
     for ax, field_type in zip(axes, ["categorical", "continuous"]):
         df = audit_df[audit_df["field_type"] == field_type].copy().sort_values(["usable", "coverage", "field_name"], ascending=[False, False, True])
         y = np.arange(len(df))
@@ -892,7 +1132,15 @@ def _heatmap_color(ax: plt.Axes, values: np.ndarray, y_labels: Sequence[str], ti
 
 
 def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_path: Path) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig = plt.figure(figsize=(15, 10))
+    gs = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 0.055], wspace=0.42, hspace=0.28)
+    axes = np.array(
+        [
+            [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])],
+            [fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])],
+        ]
+    )
+    cax = fig.add_subplot(gs[:, 2])
     im = None
     for row_idx, target in enumerate(TARGETS):
         for col_idx, backbone_name in enumerate(BACKBONES):
@@ -907,10 +1155,11 @@ def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_pat
             labels = subset["field_name"].tolist()
             im = _heatmap_color(ax, values, labels, f"{backbone_name} | {target}", "magma")
     if im is not None:
-        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
+        cbar = fig.colorbar(im, cax=cax)
         cbar.set_label("Combined anchor score")
+    else:
+        cax.axis("off")
     fig.suptitle(f"Global Analysis 4-1: Top {field_type.title()} Anchors", y=0.99)
-    fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -1145,8 +1394,10 @@ def _format_float(value: float) -> str:
 def write_markdown(
     output_path: Path,
     audit_df: pd.DataFrame,
+    field_specs_df: pd.DataFrame,
     anchor_df: pd.DataFrame,
     field_audit_path: Path,
+    field_catalog_path: Path,
 ) -> None:
     lines: List[str] = []
     lines.append("# Global Analysis 4-1: Cluster Anchoring Attribution Analysis")
@@ -1155,9 +1406,12 @@ def write_markdown(
     dropped = audit_df[audit_df["usable"] == 0]
     lines.append("## Setup")
     lines.append("")
+    lines.append(f"- discovered categorical fields: {int((field_specs_df['field_type'] == 'categorical').sum())}")
+    lines.append(f"- discovered continuous fields: {int((field_specs_df['field_type'] == 'continuous').sum())}")
     lines.append(f"- usable categorical fields: {', '.join(usable[usable['field_type'] == 'categorical']['field_name'].tolist())}")
     lines.append(f"- usable continuous fields: {', '.join(usable[usable['field_type'] == 'continuous']['field_name'].tolist())}")
     lines.append(f"- field audit CSV: `{field_audit_path}`")
+    lines.append(f"- field catalog CSV: `{field_catalog_path}`")
     lines.append("")
     lines.append("## Top Anchors (Probe)")
     lines.append("")
@@ -1239,7 +1493,7 @@ def main() -> None:
         if sorted(targets) != sorted(TARGETS):
             raise ValueError(f"Expected targets {TARGETS}, got {targets}")
 
-        manifest, full_manifest_hash = build_anchor_manifest(
+        manifest, full_manifest_hash, field_specs_df = build_anchor_manifest(
             global2_root=global2_root,
             image_root=image_root,
             dcm_root=dcm_root,
@@ -1248,13 +1502,17 @@ def main() -> None:
             seed=int(args.seed),
         )
         active_manifest_hash = hash_dataframe(manifest, ["image_id", "img_path", "patient_id", "study_id"])
-        audit_df, usable_categorical, usable_continuous = audit_fields(manifest)
+        audit_df, usable_categorical, usable_continuous = audit_fields(manifest, field_specs_df)
         audit_df.to_csv(out_root / "summary_global_4_1_field_audit.csv", index=False)
         save_field_audit_figure(audit_df, out_root / "fig_global4_1_field_audit.png")
+        log(
+            f"Discovered fields | categorical={int((field_specs_df['field_type'] == 'categorical').sum())} "
+            f"continuous={int((field_specs_df['field_type'] == 'continuous').sum())}"
+        )
         log(f"Usable categorical fields: {usable_categorical}")
         log(f"Usable continuous fields: {usable_continuous}")
 
-        field_group_map = {name: group for name, group in CATEGORICAL_CANDIDATES + CONTINUOUS_CANDIDATES}
+        field_group_map = dict(zip(field_specs_df["field_name"].tolist(), field_specs_df["field_group"].tolist()))
         for ref_name in REFERENCE_FIELDS:
             field_group_map[ref_name] = "reference"
 
@@ -1472,8 +1730,10 @@ def main() -> None:
         write_markdown(
             output_path=out_root / "analysis_global_4_1_cluster_anchoring_attribution.md",
             audit_df=audit_df,
+            field_specs_df=field_specs_df,
             anchor_df=anchor_rank_df,
             field_audit_path=out_root / "summary_global_4_1_field_audit.csv",
+            field_catalog_path=out_root / "summary_global_4_1_field_catalog.csv",
         )
         run_meta = {
             "global2_root": str(global2_root),
@@ -1491,6 +1751,8 @@ def main() -> None:
             "active_manifest_hash": active_manifest_hash,
             "usable_categorical_fields": usable_categorical,
             "usable_continuous_fields": usable_continuous,
+            "field_catalog_path": str((out_root / "summary_global_4_1_field_catalog.csv").resolve()),
+            "num_discovered_fields": int(len(field_specs_df)),
             "feature_hashes": feature_hashes,
             "log_path": str(log_path.resolve()),
         }
