@@ -848,17 +848,52 @@ def save_cluster_metrics_compare_figure(summary_df: pd.DataFrame, output_path: P
     plt.close(fig)
 
 
-def _heatmap(ax: plt.Axes, values: np.ndarray, row_labels: Sequence[str], col_labels: Sequence[str], title: str) -> None:
-    im = ax.imshow(values, aspect="auto", cmap="viridis")
+def _columnwise_normalize(values: np.ndarray) -> np.ndarray:
+    normalized = np.full_like(values, np.nan, dtype=np.float64)
+    for col_idx in range(values.shape[1]):
+        column = values[:, col_idx].astype(np.float64, copy=False)
+        finite = np.isfinite(column)
+        if not finite.any():
+            continue
+        col_min = float(np.min(column[finite]))
+        col_max = float(np.max(column[finite]))
+        if math.isclose(col_min, col_max, rel_tol=0.0, abs_tol=1e-12):
+            normalized[finite, col_idx] = 0.5
+        else:
+            normalized[finite, col_idx] = (column[finite] - col_min) / (col_max - col_min)
+    return normalized
+
+
+def _build_clumped_signal(values: np.ndarray, col_labels: Sequence[str]) -> np.ndarray:
+    normalized = _columnwise_normalize(values)
+    clumped = normalized.copy()
+    for col_idx, label in enumerate(col_labels):
+        if label == "effective_rank":
+            clumped[:, col_idx] = 1.0 - normalized[:, col_idx]
+        elif label in {"anisotropy_ratio", "lambda1_share", "uniformity"}:
+            clumped[:, col_idx] = normalized[:, col_idx]
+        else:
+            raise ValueError(f"Unsupported spectral scalar label: {label}")
+    return clumped
+
+
+def _heatmap(ax: plt.Axes, values: np.ndarray, row_labels: Sequence[str], col_labels: Sequence[str], title: str) -> matplotlib.image.AxesImage:
+    clumped_signal = _build_clumped_signal(values, col_labels)
+    im = ax.imshow(clumped_signal, aspect="auto", cmap="coolwarm", vmin=0.0, vmax=1.0)
     ax.set_xticks(np.arange(len(col_labels)), col_labels)
     ax.set_yticks(np.arange(len(row_labels)), row_labels)
-    ax.set_title(title)
+    ax.set_title(f"{title} (column-wise clumped/spread signal)")
     for r in range(values.shape[0]):
         for c in range(values.shape[1]):
             val = values[r, c]
             text = "nan" if not math.isfinite(float(val)) else f"{val:.3f}"
-            ax.text(c, r, text, ha="center", va="center", color="white", fontsize=8)
-    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            color = "black"
+            if math.isfinite(float(clumped_signal[r, c])):
+                rgba = im.cmap(im.norm(clumped_signal[r, c]))
+                luminance = 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
+                color = "white" if luminance < 0.45 else "black"
+            ax.text(c, r, text, ha="center", va="center", color=color, fontsize=8)
+    return im
 
 
 def save_spectral_compare_figure(
@@ -866,10 +901,11 @@ def save_spectral_compare_figure(
     summary_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(17, 10))
     scalar_metrics = ["effective_rank", "anisotropy_ratio", "lambda1_share", "uniformity"]
     row_labels = [_condition_label(b, m) for b, m, _ in CONDITION_ORDER]
     col_labels = scalar_metrics
+    heatmap_im = None
     for row_idx, target in enumerate(["patient", "study"]):
         ax_line = axes[row_idx, 0]
         target_spec = spectrum_df[spectrum_df["target"] == target]
@@ -891,10 +927,21 @@ def save_spectral_compare_figure(
             row = target_summary[(target_summary["backbone_name"] == backbone_name) & (target_summary["mode"] == mode)]
             for c, metric in enumerate(scalar_metrics):
                 heat[r, c] = float(row.iloc[0][f"{metric}_mean"])
-        _heatmap(axes[row_idx, 1], heat, row_labels, col_labels, f"{target.title()} head | spectral scalars")
+        heatmap_im = _heatmap(axes[row_idx, 1], heat, row_labels, col_labels, f"{target.title()} head | spectral scalars")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncols=4, bbox_to_anchor=(0.5, 1.02))
-    fig.tight_layout()
+    if heatmap_im is not None:
+        fig.subplots_adjust(left=0.06, right=0.92, top=0.93, bottom=0.07, wspace=0.2, hspace=0.22)
+        cbar_ax = fig.add_axes([0.935, 0.31, 0.012, 0.38])
+        cbar = fig.colorbar(heatmap_im, cax=cbar_ax)
+        cbar.set_ticks([])
+        cbar.ax.set_yticks([])
+        cbar.ax.tick_params(length=0)
+        cbar.outline.set_linewidth(0.6)
+        cbar.ax.text(0.5, 1.02, "Clumped", ha="center", va="bottom", transform=cbar.ax.transAxes, fontsize=8)
+        cbar.ax.text(0.5, -0.04, "Spread", ha="center", va="top", transform=cbar.ax.transAxes, fontsize=8)
+    else:
+        fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
