@@ -1092,6 +1092,23 @@ def aggregate_rows(raw_df: pd.DataFrame, group_cols: Sequence[str], metric_cols:
     return pd.DataFrame(rows)
 
 
+def assign_anchor_ranks(anchor_df: pd.DataFrame) -> pd.DataFrame:
+    if anchor_df.empty:
+        out = anchor_df.copy()
+        out["rank_within_type"] = np.nan
+        return out
+    out_frames: list[pd.DataFrame] = []
+    for (backbone_name, target, field_type), group in anchor_df.groupby(["backbone_name", "target", "field_type"], sort=False):
+        ranked = group.copy()
+        ranked["rank_within_type"] = np.nan
+        nuisance_mask = ranked["field_group"] != "reference"
+        nuisance = ranked[nuisance_mask].sort_values(["combined_anchor_score_mean", "field_name"], ascending=[False, True]).reset_index(drop=True)
+        rank_map = {field: rank + 1 for rank, field in enumerate(nuisance["field_name"].tolist())}
+        ranked.loc[nuisance_mask, "rank_within_type"] = ranked.loc[nuisance_mask, "field_name"].map(rank_map)
+        out_frames.append(ranked)
+    return pd.concat(out_frames, ignore_index=True)
+
+
 def save_field_audit_figure(audit_df: pd.DataFrame, output_path: Path) -> None:
     max_rows = max(
         int((audit_df["field_type"] == "categorical").sum()),
@@ -1114,12 +1131,31 @@ def save_field_audit_figure(audit_df: pd.DataFrame, output_path: Path) -> None:
     plt.close(fig)
 
 
-def _heatmap_color(ax: plt.Axes, values: np.ndarray, y_labels: Sequence[str], title: str, cmap: str) -> matplotlib.image.AxesImage:
+def _heatmap_color(
+    ax: plt.Axes,
+    values: np.ndarray,
+    y_labels: Sequence[str],
+    title: str,
+    cmap: str,
+    tick_fontsize_override: int | None = None,
+    value_fontsize_override: int | None = None,
+) -> matplotlib.image.AxesImage:
     if values.size == 0:
         values = np.zeros((1, 1), dtype=np.float64)
         y_labels = ["(none)"]
     im = ax.imshow(values, aspect="auto", cmap=cmap)
-    ax.set_yticks(np.arange(len(y_labels)), y_labels)
+    label_count = len(y_labels)
+    if tick_fontsize_override is not None:
+        tick_fontsize = tick_fontsize_override
+    elif label_count <= 15:
+        tick_fontsize = 8
+    elif label_count <= 30:
+        tick_fontsize = 7
+    elif label_count <= 50:
+        tick_fontsize = 6
+    else:
+        tick_fontsize = 5
+    ax.set_yticks(np.arange(len(y_labels)), y_labels, fontsize=tick_fontsize)
     ax.set_xticks([0], ["score"])
     ax.set_title(title)
     for r in range(values.shape[0]):
@@ -1127,12 +1163,29 @@ def _heatmap_color(ax: plt.Axes, values: np.ndarray, y_labels: Sequence[str], ti
         rgba = im.cmap(im.norm(val))
         luminance = 0.2126 * rgba[0] + 0.7152 * rgba[1] + 0.0722 * rgba[2]
         color = "white" if luminance < 0.45 else "black"
-        ax.text(0, r, f"{val:.3f}", ha="center", va="center", color=color, fontsize=8)
+        if value_fontsize_override is not None:
+            value_fontsize = value_fontsize_override
+        else:
+            value_fontsize = 8 if label_count <= 20 else 7 if label_count <= 40 else 6
+        ax.text(0, r, f"{val:.3f}", ha="center", va="center", color=color, fontsize=value_fontsize)
     return im
 
 
-def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_path: Path) -> None:
-    fig = plt.figure(figsize=(15, 10))
+def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_path: Path, top_n: int | None = 10) -> None:
+    max_rows = 1
+    for target in TARGETS:
+        for backbone_name in BACKBONES:
+            subset = anchor_df[
+                (anchor_df["field_type"] == field_type)
+                & (anchor_df["field_group"] != "reference")
+                & (anchor_df["target"] == target)
+                & (anchor_df["backbone_name"] == backbone_name)
+            ].sort_values("combined_anchor_score_mean", ascending=False)
+            if top_n is not None:
+                subset = subset.head(top_n)
+            max_rows = max(max_rows, len(subset))
+    fig_height = max(10.0, min(28.0, 4.0 + 0.23 * max_rows))
+    fig = plt.figure(figsize=(15, fig_height))
     gs = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 0.055], wspace=0.42, hspace=0.28)
     axes = np.array(
         [
@@ -1150,7 +1203,9 @@ def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_pat
                 & (anchor_df["field_group"] != "reference")
                 & (anchor_df["target"] == target)
                 & (anchor_df["backbone_name"] == backbone_name)
-            ].sort_values("combined_anchor_score_mean", ascending=False).head(10)
+            ].sort_values("combined_anchor_score_mean", ascending=False)
+            if top_n is not None:
+                subset = subset.head(top_n)
             values = subset[["combined_anchor_score_mean"]].to_numpy(dtype=np.float64)
             labels = subset["field_name"].tolist()
             im = _heatmap_color(ax, values, labels, f"{backbone_name} | {target}", "magma")
@@ -1159,7 +1214,59 @@ def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_pat
         cbar.set_label("Combined anchor score")
     else:
         cax.axis("off")
-    fig.suptitle(f"Global Analysis 4-1: Top {field_type.title()} Anchors", y=0.99)
+    title_prefix = "Top" if top_n is not None else "All"
+    fig.suptitle(f"Global Analysis 4-1: {title_prefix} {field_type.title()} Anchors", y=0.995)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_anchor_rank_target_figure(
+    anchor_df: pd.DataFrame,
+    field_type: str,
+    target: str,
+    output_path: Path,
+    top_n: int | None = None,
+) -> None:
+    subsets: list[pd.DataFrame] = []
+    max_rows = 1
+    for backbone_name in BACKBONES:
+        subset = anchor_df[
+            (anchor_df["field_type"] == field_type)
+            & (anchor_df["field_group"] != "reference")
+            & (anchor_df["target"] == target)
+            & (anchor_df["backbone_name"] == backbone_name)
+        ].sort_values("combined_anchor_score_mean", ascending=False)
+        if top_n is not None:
+            subset = subset.head(top_n)
+        subsets.append(subset)
+        max_rows = max(max_rows, len(subset))
+    fig_height = max(12.0, min(32.0, 5.0 + 0.28 * max_rows))
+    fig = plt.figure(figsize=(16, fig_height))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 1.0, 0.055], wspace=0.40)
+    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])]
+    cax = fig.add_subplot(gs[0, 2])
+    im = None
+    tick_fontsize = 10 if max_rows <= 35 else 9 if max_rows <= 55 else 8 if max_rows <= 75 else 7
+    value_fontsize = 9 if max_rows <= 45 else 8
+    for ax, backbone_name, subset in zip(axes, BACKBONES, subsets):
+        values = subset[["combined_anchor_score_mean"]].to_numpy(dtype=np.float64)
+        labels = subset["field_name"].tolist()
+        im = _heatmap_color(
+            ax,
+            values,
+            labels,
+            f"{backbone_name} | {target}",
+            "magma",
+            tick_fontsize_override=tick_fontsize,
+            value_fontsize_override=value_fontsize,
+        )
+    if im is not None:
+        cbar = fig.colorbar(im, cax=cax)
+        cbar.set_label("Combined anchor score")
+    else:
+        cax.axis("off")
+    title_prefix = "Top" if top_n is not None else "All"
+    fig.suptitle(f"Global Analysis 4-1: {title_prefix} {field_type.title()} Anchors | {target.title()} Head", y=0.995)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -1259,6 +1366,113 @@ def save_umap_overlay_top_continuous(
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
+
+
+def _safe_field_filename(field_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(field_name)).strip("._")
+    return safe or "field"
+
+
+def save_umap_overlay_field_categorical(
+    embedding: np.ndarray,
+    manifest: pd.DataFrame,
+    field_name: str,
+    output_path: Path,
+    seed: int,
+) -> None:
+    coords = _build_umap_coords(embedding, random_state=seed)
+    series = manifest[field_name].astype(str).fillna("<missing>")
+    top_values = series.value_counts().head(8).index.tolist()
+    color_values = series.where(series.isin(top_values), other="Other")
+    palette = plt.get_cmap("tab10")
+    unique_values = list(dict.fromkeys(top_values + (["Other"] if (color_values == "Other").any() else [])))
+    fig, ax = plt.subplots(1, 1, figsize=(8.5, 6.6))
+    for idx_value, value in enumerate(unique_values):
+        mask = color_values.to_numpy(dtype=str) == value
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            s=18,
+            color=palette(idx_value % palette.N) if value != "Other" else "#D0D0D0",
+            alpha=0.78 if value != "Other" else 0.35,
+            label=value,
+            linewidths=0,
+        )
+    ax.set_title(field_name)
+    ax.grid(alpha=0.18)
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=7, frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_umap_overlay_field_continuous(
+    embedding: np.ndarray,
+    manifest: pd.DataFrame,
+    field_name: str,
+    output_path: Path,
+    seed: int,
+) -> None:
+    coords = _build_umap_coords(embedding, random_state=seed)
+    values = pd.to_numeric(manifest[field_name], errors="coerce").to_numpy(dtype=np.float64)
+    valid = np.isfinite(values)
+    fig, ax = plt.subplots(1, 1, figsize=(8.2, 6.4))
+    ax.scatter(coords[~valid, 0], coords[~valid, 1], s=14, c="#D0D0D0", alpha=0.22, linewidths=0)
+    sc = ax.scatter(coords[valid, 0], coords[valid, 1], s=16, c=values[valid], cmap="viridis", alpha=0.82, linewidths=0)
+    fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    ax.set_title(field_name)
+    ax.grid(alpha=0.18)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+
+def export_umap_overlays_for_nonnegative_fields(
+    aggregate_anchor_df: pd.DataFrame,
+    embedding_map: Dict[Tuple[str, str], np.ndarray],
+    manifest: pd.DataFrame,
+    output_root: Path,
+    seed: int,
+) -> pd.DataFrame:
+    ensure_dir(output_root)
+    rows: list[dict[str, object]] = []
+    for field_type in ["categorical", "continuous"]:
+        for target in TARGETS:
+            for backbone_name in BACKBONES:
+                subset = aggregate_anchor_df[
+                    (aggregate_anchor_df["field_type"] == field_type)
+                    & (aggregate_anchor_df["target"] == target)
+                    & (aggregate_anchor_df["backbone_name"] == backbone_name)
+                    & (aggregate_anchor_df["combined_anchor_score_mean"] >= 0)
+                ].sort_values(["combined_anchor_score_mean", "field_name"], ascending=[False, True])
+                if field_type == "categorical":
+                    subset = subset[subset["field_group"] != "reference"]
+                export_dir = output_root / field_type / target / backbone_name
+                ensure_dir(export_dir)
+                embedding = embedding_map[(backbone_name, target)]
+                for row in subset.itertuples():
+                    filename = f"{int(row.rank_within_type):03d}_{_safe_field_filename(str(row.field_name))}.png" if pd.notna(row.rank_within_type) else f"{_safe_field_filename(str(row.field_name))}.png"
+                    output_path = export_dir / filename
+                    if field_type == "categorical":
+                        save_umap_overlay_field_categorical(embedding, manifest, str(row.field_name), output_path, seed=seed)
+                    else:
+                        save_umap_overlay_field_continuous(embedding, manifest, str(row.field_name), output_path, seed=seed)
+                    rows.append(
+                        {
+                            "field_type": field_type,
+                            "target": target,
+                            "backbone_name": backbone_name,
+                            "field_name": str(row.field_name),
+                            "field_group": str(row.field_group),
+                            "rank_within_type": float(row.rank_within_type) if pd.notna(row.rank_within_type) else np.nan,
+                            "combined_anchor_score_mean": float(row.combined_anchor_score_mean),
+                            "combined_anchor_score_std": float(row.combined_anchor_score_std),
+                            "output_path": str(output_path.resolve()),
+                        }
+                    )
+    export_df = pd.DataFrame(rows)
+    export_df.to_csv(output_root / "index_score_ge_0.csv", index=False)
+    return export_df
 
 
 def save_patient_vs_nuisance_compare(
@@ -1682,9 +1896,10 @@ def main() -> None:
         )
         anchor_rank_df = aggregate_rows(
             anchor_rank_raw_df,
-            group_cols=["backbone_name", "target", "field_name", "field_type", "field_group", "rank_within_type"],
+            group_cols=["backbone_name", "target", "field_name", "field_type", "field_group"],
             metric_cols=["local_metric", "global_metric", "local_z", "global_z", "combined_anchor_score"],
         )
+        anchor_rank_df = assign_anchor_ranks(anchor_rank_df)
 
         neighborhood_categorical_raw_df.to_csv(out_root / "summary_global_4_1_neighborhood_categorical_raw.csv", index=False)
         neighborhood_continuous_raw_df.to_csv(out_root / "summary_global_4_1_neighborhood_continuous_raw.csv", index=False)
@@ -1698,8 +1913,12 @@ def main() -> None:
         cluster_continuous_df.to_csv(out_root / "summary_global_4_1_cluster_continuous.csv", index=False)
         anchor_rank_df.to_csv(out_root / "summary_global_4_1_anchor_rank.csv", index=False)
 
-        save_anchor_rank_figure(anchor_rank_df, "categorical", out_root / "fig_global4_1_anchor_rank_categorical.png")
+        save_anchor_rank_figure(anchor_rank_df, "categorical", out_root / "fig_global4_1_anchor_rank_categorical.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "categorical", "patient", out_root / "fig_global4_1_anchor_rank_categorical_patient.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "categorical", "study", out_root / "fig_global4_1_anchor_rank_categorical_study.png", top_n=None)
         save_anchor_rank_figure(anchor_rank_df, "continuous", out_root / "fig_global4_1_anchor_rank_continuous.png")
+        save_anchor_rank_target_figure(anchor_rank_df, "continuous", "patient", out_root / "fig_global4_1_anchor_rank_continuous_patient.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "continuous", "study", out_root / "fig_global4_1_anchor_rank_continuous_study.png", top_n=None)
         save_umap_overlay_top_categorical(
             aggregate_anchor_df=anchor_rank_df,
             embedding_map=seed11_embedding_map,
@@ -1712,6 +1931,13 @@ def main() -> None:
             embedding_map=seed11_embedding_map,
             manifest=manifest,
             output_path=out_root / "fig_global4_1_umap_overlay_top_continuous.png",
+            seed=int(args.seed),
+        )
+        export_umap_overlays_for_nonnegative_fields(
+            aggregate_anchor_df=anchor_rank_df,
+            embedding_map=seed11_embedding_map,
+            manifest=manifest,
+            output_root=out_root / "umap_overlays_score_ge_0",
             seed=int(args.seed),
         )
         save_patient_vs_nuisance_compare(anchor_rank_df, out_root / "fig_global4_1_patient_vs_nuisance_compare.png")
