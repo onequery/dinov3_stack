@@ -1063,7 +1063,7 @@ def save_umap_probe_figure(
             loc="upper left",
             bbox_to_anchor=(0.0, 1.0),
             ncols=1,
-            fontsize=8,
+            fontsize=10,
             frameon=False,
         )
     fig.subplots_adjust(left=0.05, right=0.97, top=0.96, bottom=0.06, wspace=0.16, hspace=0.18)
