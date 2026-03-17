@@ -931,7 +931,15 @@ def save_umap_probe_figure(
         return
     patient_cmap = plt.get_cmap("tab10")
     selected_set = set(selected_patients)
-    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    fig = plt.figure(figsize=(20, 14))
+    gs = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 0.42], wspace=0.18, hspace=0.18)
+    axes = np.empty((2, 2), dtype=object)
+    axes[0, 0] = fig.add_subplot(gs[0, 0])
+    axes[0, 1] = fig.add_subplot(gs[0, 1])
+    axes[1, 0] = fig.add_subplot(gs[1, 0])
+    axes[1, 1] = fig.add_subplot(gs[1, 1])
+    legend_ax = fig.add_subplot(gs[:, 2])
+    legend_ax.axis("off")
     chosen_seed = int(probe_seeds[0])
     umap_rows: List[Dict[str, object]] = []
 
@@ -1002,8 +1010,16 @@ def save_umap_probe_figure(
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
-        fig.legend(handles, labels, loc="upper center", ncols=min(4, len(handles)), bbox_to_anchor=(0.5, 1.02))
-    fig.tight_layout()
+        legend_ax.legend(
+            handles,
+            labels,
+            loc="upper left",
+            bbox_to_anchor=(0.0, 1.0),
+            ncols=1,
+            fontsize=8,
+            frameon=False,
+        )
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.96, bottom=0.06, wspace=0.16, hspace=0.18)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
     if umap_rows:
