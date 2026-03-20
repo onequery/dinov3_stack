@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "$ROOT_DIR"
 
 CONDA_ENV="${CONDA_ENV:-dinov3_stack}"
@@ -17,7 +17,7 @@ TEST_IMAGES="${TEST_IMAGES:-input/MPXA-Seg/test_images}"
 TEST_MASKS="${TEST_MASKS:-input/MPXA-Seg/test_labels}"
 SEG_CONFIG="${SEG_CONFIG:-configs_segmentation/mpxa-seg.yaml}"
 
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/local_2_segmentation_linear_probe}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/local_2_1_layerwise_segmentation_linear_probe_multiseed}"
 DEVICE="${DEVICE:-cuda}"
 MODEL_NAME="${MODEL_NAME:-dinov3_vits16}"
 REPO_DIR="${REPO_DIR:-dinov3}"
@@ -34,22 +34,26 @@ EARLY_STOPPING_PATIENCE="${EARLY_STOPPING_PATIENCE:-20}"
 EARLY_STOPPING_MIN_DELTA="${EARLY_STOPPING_MIN_DELTA:-0.0}"
 LR_GRID_STR="${LR_GRID_STR:-1e-2 3e-3 1e-3}"
 read -r -a LR_GRID <<<"${LR_GRID_STR}"
+LAYERS_STR="${LAYERS_STR:-1 6 12}"
+read -r -a LAYERS <<<"${LAYERS_STR}"
+SEEDS_STR="${SEEDS_STR:-11 22 33}"
+read -r -a SEEDS <<<"${SEEDS_STR}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-SEED="${SEED:-42}"
-NUM_EXAMPLE_IMAGES="${NUM_EXAMPLE_IMAGES:-8}"
 MAX_IMAGES_PER_SPLIT="${MAX_IMAGES_PER_SPLIT:-}"
+KEEP_FEATURE_CACHES="${KEEP_FEATURE_CACHES:-0}"
+STRICT_DETERMINISTIC="${STRICT_DETERMINISTIC:-0}"
 LOG_FILE="${LOG_FILE:-run_gpu${CUDA_VISIBLE_DEVICES}.log}"
 
-echo "[run_local_2_segmentation_linear_probe] ROOT_DIR=${ROOT_DIR}"
-echo "[run_local_2_segmentation_linear_probe] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "[run_local_2_segmentation_linear_probe] OUTPUT_ROOT=${OUTPUT_ROOT}"
+echo "[run_local_2_1_layerwise_segmentation_linear_probe] ROOT_DIR=${ROOT_DIR}"
+echo "[run_local_2_1_layerwise_segmentation_linear_probe] CONDA_ENV=${CONDA_ENV} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "[run_local_2_1_layerwise_segmentation_linear_probe] OUTPUT_ROOT=${OUTPUT_ROOT}"
 
 CMD=(
   conda run --no-capture-output -n "${CONDA_ENV}"
   env
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
   PYTHONUNBUFFERED="${PYTHONUNBUFFERED}"
-  python scripts/analysis/local_2_segmentation_linear_probe.py
+  python scripts/analysis/local_2_1_layerwise_segmentation_linear_probe.py
   --train-images "${TRAIN_IMAGES}"
   --train-masks "${TRAIN_MASKS}"
   --valid-images "${VALID_IMAGES}"
@@ -70,21 +74,27 @@ CMD=(
   --early-stopping-min-delta "${EARLY_STOPPING_MIN_DELTA}"
   --device "${DEVICE}"
   --num-workers "${NUM_WORKERS}"
-  --seed "${SEED}"
-  --num-example-images "${NUM_EXAMPLE_IMAGES}"
   --model-name "${MODEL_NAME}"
   --repo-dir "${REPO_DIR}"
   --cache-features
   --lr-grid "${LR_GRID[@]}"
+  --layers "${LAYERS[@]}"
+  --seeds "${SEEDS[@]}"
 )
 
 if [[ -n "${MAX_IMAGES_PER_SPLIT}" ]]; then
   CMD+=(--max-images-per-split "${MAX_IMAGES_PER_SPLIT}")
 fi
+if [[ "${KEEP_FEATURE_CACHES}" == "1" ]]; then
+  CMD+=(--keep-feature-caches)
+fi
+if [[ "${STRICT_DETERMINISTIC}" == "1" ]]; then
+  CMD+=(--strict-deterministic)
+fi
 
 CMD+=("$@")
 
-printf '[run_local_2_segmentation_linear_probe] CMD:'
+printf '[run_local_2_1_layerwise_segmentation_linear_probe] CMD:'
 printf ' %q' "${CMD[@]}"
 printf '\n'
 

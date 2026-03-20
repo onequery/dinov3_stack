@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Global Analysis 4-2 — Cluster Anchoring Attribution Analysis.
+Global Analysis 4-1 — Cluster Anchoring Attribution Analysis.
 
-This analysis reuses Global Analysis 4-2 probe checkpoints and test features to find
-which nuisance modalities anchor the same-DICOM retrieval probe embedding space.
+This analysis reuses Global Analysis 2 probe checkpoints and test features to find
+which nuisance modalities anchor the probe embedding space more strongly than
+patient/study identity.
 """
 
 from __future__ import annotations
@@ -41,13 +42,13 @@ from sklearn.metrics import normalized_mutual_info_score
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 PLOT_COLORS = {"imagenet": "#4C72B0", "cag": "#DD8452"}
 BACKBONES = ["imagenet", "cag"]
-TARGETS = ["same_dicom"]
+TARGETS = ["patient", "study"]
 KNN_K_DEFAULT = [5, 10, 20]
 KMEANS_K_DEFAULT = [8, 12, 16]
-REFERENCE_FIELDS = ["patient_id", "study_id", "dicom_id"]
+REFERENCE_FIELDS = ["patient_id", "study_id"]
 DTYPE_ORDER = {"categorical": 0, "continuous": 1}
 FIELD_NAME_RE = re.compile(r"[^0-9A-Za-z]+")
 NUMERIC_VRS = {"DS", "FD", "FL", "IS", "SL", "SS", "SV", "UL", "US", "UV"}
@@ -616,20 +617,14 @@ def build_anchor_manifest(
     seed: int,
 ) -> Tuple[pd.DataFrame, str, pd.DataFrame]:
     base_manifest = load_csv(global2_root / "image_manifest_test.csv")
-    full_manifest_hash = hash_dataframe(
-        base_manifest,
-        ["image_id", "img_path", "patient_id", "study_id", "dicom_id", "frame_index", "frame_offset"],
-    )
+    full_manifest_hash = hash_dataframe(base_manifest, ["image_id", "img_path", "patient_id", "study_id"])
     manifest = maybe_subsample_manifest(base_manifest, max_images, seed)
     rows: List[Dict[str, object]] = []
     field_specs: Dict[str, FieldSpec] = {}
     for _, row in manifest.iterrows():
         img_path = Path(str(row["img_path"])).resolve()
-        if "dicom_rel_path" in row and pd.notna(row["dicom_rel_path"]):
-            dcm_path = dcm_root.resolve() / str(row["dicom_rel_path"])
-        else:
-            rel = img_path.relative_to(image_root.resolve())
-            dcm_path = dcm_root.resolve() / rel.with_suffix(".dcm")
+        rel = img_path.relative_to(image_root.resolve())
+        dcm_path = dcm_root.resolve() / rel.with_suffix(".dcm")
         if not dcm_path.exists():
             raise FileNotFoundError(f"Missing DICOM for image: {img_path}")
         meta, dicom_specs = extract_dicom_scalar_fields(dcm_path)
@@ -665,21 +660,12 @@ def build_anchor_manifest(
             register_field(field_specs, name, "categorical", "derived", "angle_derived")
         for name in ["primary_angle_abs", "secondary_angle_abs"]:
             register_field(field_specs, name, "continuous", "derived", "angle_derived")
-        register_field(field_specs, "frame_offset", "categorical", "derived", "same_dicom_pair")
-        register_field(field_specs, "frame_index", "continuous", "derived", "same_dicom_pair")
-        register_field(field_specs, "contrast_frame_index", "continuous", "derived", "same_dicom_pair")
         combined = {
             "image_id": int(row["image_id"]),
             "img_path": str(img_path),
             "patient_id": str(row["patient_id"]),
             "study_id": str(row["study_id"]),
-            "dicom_id": str(row["dicom_id"]),
             "class_name": str(row.get("class_name", "")),
-            "dicom_rel_path": str(row.get("dicom_rel_path", "")),
-            "frame_offset": int(row.get("frame_offset", 0)),
-            "frame_index": int(row.get("frame_index", 0)),
-            "contrast_frame_index": int(row.get("contrast_frame_index", 0)),
-            "source_contrast_png": str(row.get("source_contrast_png", "")),
             **meta,
             **derived_values,
             **image_stats,
@@ -693,7 +679,7 @@ def build_anchor_manifest(
     field_specs_df = pd.DataFrame([spec.__dict__ for spec in field_specs.values()]).sort_values(
         ["field_group", "field_type", "field_name"]
     ).reset_index(drop=True)
-    field_specs_df.to_csv(output_root / "summary_global_4_2_field_catalog.csv", index=False)
+    field_specs_df.to_csv(output_root / "summary_global_4_1_field_catalog.csv", index=False)
     return out_df, full_manifest_hash, field_specs_df
 
 
@@ -1198,14 +1184,15 @@ def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_pat
             if top_n is not None:
                 subset = subset.head(top_n)
             max_rows = max(max_rows, len(subset))
-    num_targets = max(1, len(TARGETS))
-    fig_height = max(6.0, min(28.0, 3.0 * num_targets + 0.23 * max_rows))
+    fig_height = max(10.0, min(28.0, 4.0 + 0.23 * max_rows))
     fig = plt.figure(figsize=(15, fig_height))
-    gs = fig.add_gridspec(num_targets, 3, width_ratios=[1.0, 1.0, 0.055], wspace=0.42, hspace=0.28)
-    axes = np.empty((num_targets, 2), dtype=object)
-    for row_idx in range(num_targets):
-        axes[row_idx, 0] = fig.add_subplot(gs[row_idx, 0])
-        axes[row_idx, 1] = fig.add_subplot(gs[row_idx, 1])
+    gs = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 0.055], wspace=0.42, hspace=0.28)
+    axes = np.array(
+        [
+            [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1])],
+            [fig.add_subplot(gs[1, 0]), fig.add_subplot(gs[1, 1])],
+        ]
+    )
     cax = fig.add_subplot(gs[:, 2])
     im = None
     for row_idx, target in enumerate(TARGETS):
@@ -1228,7 +1215,7 @@ def save_anchor_rank_figure(anchor_df: pd.DataFrame, field_type: str, output_pat
     else:
         cax.axis("off")
     title_prefix = "Top" if top_n is not None else "All"
-    fig.suptitle(f"Global Analysis 4-2: {title_prefix} {field_type.title()} Anchors", y=0.995)
+    fig.suptitle(f"Global Analysis 4-1: {title_prefix} {field_type.title()} Anchors", y=0.995)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -1279,7 +1266,7 @@ def save_anchor_rank_target_figure(
     else:
         cax.axis("off")
     title_prefix = "Top" if top_n is not None else "All"
-    fig.suptitle(f"Global Analysis 4-2: {title_prefix} {field_type.title()} Anchors | {target}", y=0.995)
+    fig.suptitle(f"Global Analysis 4-1: {title_prefix} {field_type.title()} Anchors | {target.title()} Head", y=0.995)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
@@ -1307,7 +1294,7 @@ def save_umap_overlay_top_categorical(
     output_path: Path,
     seed: int,
 ) -> None:
-    fig, axes = plt.subplots(len(TARGETS), len(BACKBONES), figsize=(17, max(6, 5 * len(TARGETS))), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(17, 12))
     for row_idx, target in enumerate(TARGETS):
         for col_idx, backbone_name in enumerate(BACKBONES):
             ax = axes[row_idx, col_idx]
@@ -1354,7 +1341,7 @@ def save_umap_overlay_top_continuous(
     output_path: Path,
     seed: int,
 ) -> None:
-    fig, axes = plt.subplots(len(TARGETS), len(BACKBONES), figsize=(16, max(6, 5 * len(TARGETS))), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     for row_idx, target in enumerate(TARGETS):
         for col_idx, backbone_name in enumerate(BACKBONES):
             ax = axes[row_idx, col_idx]
@@ -1440,7 +1427,7 @@ def save_umap_overlay_field_continuous(
     plt.close(fig)
 
 
-def export_umap_overlays_for_all_usable_fields(
+def export_umap_overlays_for_nonnegative_fields(
     aggregate_anchor_df: pd.DataFrame,
     embedding_map: Dict[Tuple[str, str], np.ndarray],
     manifest: pd.DataFrame,
@@ -1456,7 +1443,10 @@ def export_umap_overlays_for_all_usable_fields(
                     (aggregate_anchor_df["field_type"] == field_type)
                     & (aggregate_anchor_df["target"] == target)
                     & (aggregate_anchor_df["backbone_name"] == backbone_name)
+                    & (aggregate_anchor_df["combined_anchor_score_mean"] >= 0)
                 ].sort_values(["combined_anchor_score_mean", "field_name"], ascending=[False, True])
+                if field_type == "categorical":
+                    subset = subset[subset["field_group"] != "reference"]
                 export_dir = output_root / field_type / target / backbone_name
                 ensure_dir(export_dir)
                 embedding = embedding_map[(backbone_name, target)]
@@ -1481,44 +1471,37 @@ def export_umap_overlays_for_all_usable_fields(
                         }
                     )
     export_df = pd.DataFrame(rows)
-    export_df.to_csv(output_root / "index_all_usable.csv", index=False)
     export_df.to_csv(output_root / "index_score_ge_0.csv", index=False)
     return export_df
 
 
-def save_reference_vs_nuisance_compare(
+def save_patient_vs_nuisance_compare(
     anchor_df: pd.DataFrame,
     output_path: Path,
 ) -> None:
-    fig, axes = plt.subplots(len(TARGETS), len(BACKBONES), figsize=(14, max(5, 4 * len(TARGETS))), squeeze=False)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     for row_idx, target in enumerate(TARGETS):
         for col_idx, backbone_name in enumerate(BACKBONES):
             ax = axes[row_idx, col_idx]
             subset = anchor_df[(anchor_df["target"] == target) & (anchor_df["backbone_name"] == backbone_name)]
-            reference_rows = []
-            for ref_name in REFERENCE_FIELDS:
-                ref_subset = subset[subset["field_name"] == ref_name]
-                if not ref_subset.empty:
-                    reference_rows.append(ref_subset.iloc[0])
-            top_cat = subset[(subset["field_type"] == "categorical") & (subset["field_group"] != "reference")].sort_values("combined_anchor_score_mean", ascending=False).head(1)
-            top_cont = subset[subset["field_type"] == "continuous"].sort_values("combined_anchor_score_mean", ascending=False).head(1)
-            labels = [str(row["field_name"]) for row in reference_rows]
-            values = [float(row["combined_anchor_score_mean"]) for row in reference_rows]
-            colors = ["#4C72B0", "#55A868", "#64B5CD"][: len(reference_rows)]
-            if not top_cat.empty:
-                labels.append(str(top_cat.iloc[0]["field_name"]))
-                values.append(float(top_cat.iloc[0]["combined_anchor_score_mean"]))
-                colors.append("#DD8452")
-            if not top_cont.empty:
-                labels.append(str(top_cont.iloc[0]["field_name"]))
-                values.append(float(top_cont.iloc[0]["combined_anchor_score_mean"]))
-                colors.append("#8172B2")
+            patient_row = subset[subset["field_name"] == "patient_id"].iloc[0]
+            study_row = subset[subset["field_name"] == "study_id"].iloc[0]
+            top_cat = subset[(subset["field_type"] == "categorical") & (subset["field_group"] != "reference")].sort_values("combined_anchor_score_mean", ascending=False).iloc[0]
+            top_cont = subset[subset["field_type"] == "continuous"].sort_values("combined_anchor_score_mean", ascending=False).iloc[0]
+            labels = ["patient_id", "study_id", str(top_cat["field_name"]), str(top_cont["field_name"])]
+            values = [
+                float(patient_row["combined_anchor_score_mean"]),
+                float(study_row["combined_anchor_score_mean"]),
+                float(top_cat["combined_anchor_score_mean"]),
+                float(top_cont["combined_anchor_score_mean"]),
+            ]
+            colors = ["#4C72B0", "#55A868", "#DD8452", "#8172B2"]
             ax.barh(np.arange(len(labels)), values, color=colors)
             ax.set_yticks(np.arange(len(labels)), labels)
             ax.invert_yaxis()
             ax.set_title(f"{backbone_name} | {target}")
             ax.grid(axis="x", alpha=0.2)
-    fig.suptitle("Reference identity vs top nuisance anchors", y=0.99)
+    fig.suptitle("Patient/Study identity vs top nuisance anchors", y=0.99)
     fig.tight_layout()
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -1631,7 +1614,7 @@ def write_markdown(
     field_catalog_path: Path,
 ) -> None:
     lines: List[str] = []
-    lines.append("# Global Analysis 4-2: Cluster Anchoring Attribution Analysis")
+    lines.append("# Global Analysis 4-1: Cluster Anchoring Attribution Analysis")
     lines.append("")
     usable = audit_df[audit_df["usable"] == 1]
     dropped = audit_df[audit_df["usable"] == 0]
@@ -1671,8 +1654,7 @@ def write_markdown(
     lines.append("- If angle-derived fields dominate, the embedding space is view-anchored.")
     lines.append("- If device/protocol fields dominate, the embedding space is device/protocol anchored.")
     lines.append("- If brightness/entropy/sharpness fields dominate, the embedding space is image-appearance anchored.")
-    ref_text = ", ".join(f"`{name}`" for name in REFERENCE_FIELDS)
-    lines.append(f"- Compare nuisance anchors against {ref_text} before concluding that same-DICOM identity is not the primary organizer.")
+    lines.append("- Compare nuisance anchors against `patient_id` and `study_id` scores before concluding that patient/study identity is not the primary organizer.")
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -1689,13 +1671,13 @@ def build_jobs(probe_seeds: Sequence[int]) -> List[JobDef]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--global2-root", default="outputs/global_4_2_same_dicom_retrieval_unique_view")
-    parser.add_argument("--image-root", default="input/Stent-Contrast-same-dicom-unique-view")
+    parser.add_argument("--global2-root", default="outputs/global_2_study_patient_retrieval_unique_view")
+    parser.add_argument("--image-root", default="input/Stent-Contrast-unique-view")
     parser.add_argument("--dcm-root", default="input/stent_split_dcm_unique_view")
-    parser.add_argument("--output-root", default="outputs/global_4_2_same_dicom_retrieval_unique_view")
+    parser.add_argument("--output-root", default="outputs/global_4_1_cluster_anchoring_attribution_unique_view")
     parser.add_argument("--log-file", default=None)
     parser.add_argument("--probe-seeds", type=int, nargs="+", default=[11, 22, 33])
-    parser.add_argument("--targets", nargs="+", default=["same_dicom"])
+    parser.add_argument("--targets", nargs="+", default=["patient", "study"])
     parser.add_argument("--knn-k", type=int, nargs="+", default=KNN_K_DEFAULT)
     parser.add_argument("--cluster-k", type=int, nargs="+", default=KMEANS_K_DEFAULT)
     parser.add_argument("--probe-batch-size", type=int, default=256)
@@ -1709,7 +1691,7 @@ def main() -> None:
     log_path, file_handle, original_stdout, original_stderr = setup_console_and_file_logging(
         out_root,
         args.log_file,
-        default_prefix="global_4_2_cluster_anchoring_attribution",
+        default_prefix="global_4_1_cluster_anchoring_attribution",
     )
 
     try:
@@ -1733,13 +1715,10 @@ def main() -> None:
             max_images=args.max_images,
             seed=int(args.seed),
         )
-        active_manifest_hash = hash_dataframe(
-            manifest,
-            ["image_id", "img_path", "patient_id", "study_id", "dicom_id", "frame_index", "frame_offset"],
-        )
+        active_manifest_hash = hash_dataframe(manifest, ["image_id", "img_path", "patient_id", "study_id"])
         audit_df, usable_categorical, usable_continuous = audit_fields(manifest, field_specs_df)
-        audit_df.to_csv(out_root / "summary_global_4_2_field_audit.csv", index=False)
-        save_field_audit_figure(audit_df, out_root / "fig_global4_2_field_audit.png")
+        audit_df.to_csv(out_root / "summary_global_4_1_field_audit.csv", index=False)
+        save_field_audit_figure(audit_df, out_root / "fig_global4_1_field_audit.png")
         log(
             f"Discovered fields | categorical={int((field_specs_df['field_type'] == 'categorical').sum())} "
             f"continuous={int((field_specs_df['field_type'] == 'continuous').sum())}"
@@ -1922,44 +1901,46 @@ def main() -> None:
         )
         anchor_rank_df = assign_anchor_ranks(anchor_rank_df)
 
-        neighborhood_categorical_raw_df.to_csv(out_root / "summary_global_4_2_neighborhood_categorical_raw.csv", index=False)
-        neighborhood_continuous_raw_df.to_csv(out_root / "summary_global_4_2_neighborhood_continuous_raw.csv", index=False)
-        cluster_categorical_raw_df.to_csv(out_root / "summary_global_4_2_cluster_categorical_raw.csv", index=False)
-        cluster_continuous_raw_df.to_csv(out_root / "summary_global_4_2_cluster_continuous_raw.csv", index=False)
-        anchor_rank_raw_df.to_csv(out_root / "summary_global_4_2_anchor_rank_raw.csv", index=False)
+        neighborhood_categorical_raw_df.to_csv(out_root / "summary_global_4_1_neighborhood_categorical_raw.csv", index=False)
+        neighborhood_continuous_raw_df.to_csv(out_root / "summary_global_4_1_neighborhood_continuous_raw.csv", index=False)
+        cluster_categorical_raw_df.to_csv(out_root / "summary_global_4_1_cluster_categorical_raw.csv", index=False)
+        cluster_continuous_raw_df.to_csv(out_root / "summary_global_4_1_cluster_continuous_raw.csv", index=False)
+        anchor_rank_raw_df.to_csv(out_root / "summary_global_4_1_anchor_rank_raw.csv", index=False)
 
-        neighborhood_categorical_df.to_csv(out_root / "summary_global_4_2_neighborhood_categorical.csv", index=False)
-        neighborhood_continuous_df.to_csv(out_root / "summary_global_4_2_neighborhood_continuous.csv", index=False)
-        cluster_categorical_df.to_csv(out_root / "summary_global_4_2_cluster_categorical.csv", index=False)
-        cluster_continuous_df.to_csv(out_root / "summary_global_4_2_cluster_continuous.csv", index=False)
-        anchor_rank_df.to_csv(out_root / "summary_global_4_2_anchor_rank.csv", index=False)
+        neighborhood_categorical_df.to_csv(out_root / "summary_global_4_1_neighborhood_categorical.csv", index=False)
+        neighborhood_continuous_df.to_csv(out_root / "summary_global_4_1_neighborhood_continuous.csv", index=False)
+        cluster_categorical_df.to_csv(out_root / "summary_global_4_1_cluster_categorical.csv", index=False)
+        cluster_continuous_df.to_csv(out_root / "summary_global_4_1_cluster_continuous.csv", index=False)
+        anchor_rank_df.to_csv(out_root / "summary_global_4_1_anchor_rank.csv", index=False)
 
-        save_anchor_rank_figure(anchor_rank_df, "categorical", out_root / "fig_global4_2_anchor_rank_categorical.png", top_n=None)
-        save_anchor_rank_target_figure(anchor_rank_df, "categorical", "same_dicom", out_root / "fig_global4_2_anchor_rank_categorical_same_dicom.png", top_n=None)
-        save_anchor_rank_figure(anchor_rank_df, "continuous", out_root / "fig_global4_2_anchor_rank_continuous.png", top_n=None)
-        save_anchor_rank_target_figure(anchor_rank_df, "continuous", "same_dicom", out_root / "fig_global4_2_anchor_rank_continuous_same_dicom.png", top_n=None)
+        save_anchor_rank_figure(anchor_rank_df, "categorical", out_root / "fig_global4_1_anchor_rank_categorical.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "categorical", "patient", out_root / "fig_global4_1_anchor_rank_categorical_patient.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "categorical", "study", out_root / "fig_global4_1_anchor_rank_categorical_study.png", top_n=None)
+        save_anchor_rank_figure(anchor_rank_df, "continuous", out_root / "fig_global4_1_anchor_rank_continuous.png")
+        save_anchor_rank_target_figure(anchor_rank_df, "continuous", "patient", out_root / "fig_global4_1_anchor_rank_continuous_patient.png", top_n=None)
+        save_anchor_rank_target_figure(anchor_rank_df, "continuous", "study", out_root / "fig_global4_1_anchor_rank_continuous_study.png", top_n=None)
         save_umap_overlay_top_categorical(
             aggregate_anchor_df=anchor_rank_df,
             embedding_map=seed11_embedding_map,
             manifest=manifest,
-            output_path=out_root / "fig_global4_2_umap_overlay_top_categorical.png",
+            output_path=out_root / "fig_global4_1_umap_overlay_top_categorical.png",
             seed=int(args.seed),
         )
         save_umap_overlay_top_continuous(
             aggregate_anchor_df=anchor_rank_df,
             embedding_map=seed11_embedding_map,
             manifest=manifest,
-            output_path=out_root / "fig_global4_2_umap_overlay_top_continuous.png",
+            output_path=out_root / "fig_global4_1_umap_overlay_top_continuous.png",
             seed=int(args.seed),
         )
-        export_umap_overlays_for_all_usable_fields(
+        export_umap_overlays_for_nonnegative_fields(
             aggregate_anchor_df=anchor_rank_df,
             embedding_map=seed11_embedding_map,
             manifest=manifest,
             output_root=out_root / "umap_overlays_score_ge_0",
             seed=int(args.seed),
         )
-        save_reference_vs_nuisance_compare(anchor_rank_df, out_root / "fig_global4_2_reference_vs_nuisance_compare.png")
+        save_patient_vs_nuisance_compare(anchor_rank_df, out_root / "fig_global4_1_patient_vs_nuisance_compare.png")
         save_anchor_examples(
             anchor_df=anchor_rank_df,
             cluster_df=cluster_categorical_df,
@@ -1973,12 +1954,12 @@ def main() -> None:
         tracker.start_job(job_index)
         tracker.update_phase("write_markdown", 1, 2)
         write_markdown(
-            output_path=out_root / "analysis_global_4_2_cluster_anchoring_attribution.md",
+            output_path=out_root / "analysis_global_4_1_cluster_anchoring_attribution.md",
             audit_df=audit_df,
             field_specs_df=field_specs_df,
             anchor_df=anchor_rank_df,
-            field_audit_path=out_root / "summary_global_4_2_field_audit.csv",
-            field_catalog_path=out_root / "summary_global_4_2_field_catalog.csv",
+            field_audit_path=out_root / "summary_global_4_1_field_audit.csv",
+            field_catalog_path=out_root / "summary_global_4_1_field_catalog.csv",
         )
         run_meta = {
             "global2_root": str(global2_root),
@@ -1996,15 +1977,15 @@ def main() -> None:
             "active_manifest_hash": active_manifest_hash,
             "usable_categorical_fields": usable_categorical,
             "usable_continuous_fields": usable_continuous,
-            "field_catalog_path": str((out_root / "summary_global_4_2_field_catalog.csv").resolve()),
+            "field_catalog_path": str((out_root / "summary_global_4_1_field_catalog.csv").resolve()),
             "num_discovered_fields": int(len(field_specs_df)),
             "feature_hashes": feature_hashes,
             "log_path": str(log_path.resolve()),
         }
-        (out_root / "run_meta_global_4_2_cluster_anchoring.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+        (out_root / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
         tracker.finish_job()
 
-        log("Global Analysis 4-2 cluster anchoring attribution completed successfully.")
+        log("Global Analysis 4-1 completed successfully.")
     finally:
         restore_console_logging(file_handle, original_stdout, original_stderr)
 

@@ -22,12 +22,12 @@ import pandas as pd
 import torch
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.analysis import global_4_2_cluster_anchoring_attribution as ga42  # noqa: E402
-from scripts.analysis.global_4_3_view_classification import (  # noqa: E402
+from scripts.analysis.global_analysis import global_4_2_cluster_anchoring_attribution as ga42  # noqa: E402
+from scripts.analysis.global_analysis.global_4_3_view_classification import (  # noqa: E402
     StrictLinearClassificationProbe,
     TARGET_NAME as VIEW_TARGET_NAME,
     VIEW_COLORS,

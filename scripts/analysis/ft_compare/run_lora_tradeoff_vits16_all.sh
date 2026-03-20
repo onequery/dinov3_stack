@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 cd "$ROOT_DIR"
 export PYTHONPATH="${ROOT_DIR}:${PYTHONPATH:-}"
 export PYTHONPATH="${ROOT_DIR}/scripts/train:${PYTHONPATH}"

@@ -12,7 +12,7 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from sklearn.cluster import KMeans
 
-from scripts.analysis.global_4_1_cluster_anchoring_attribution import (
+from scripts.analysis.global_analysis.global_4_1_cluster_anchoring_attribution import (
     _build_umap_coords,
     apply_probe_checkpoint,
     ensure_dir,

@@ -213,7 +213,7 @@ run_cls_experiment() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local train_args=(
-    python train_classifier.py
+    python scripts/train/train_classifier.py
     --train-dir "$CLS_TRAIN_DIR"
     --valid-dir "$CLS_VALID_DIR"
     --weights "$weights_path"
@@ -252,7 +252,7 @@ run_cls_experiment() {
     log "[SKIP][CLS] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
   else
     run_logged "$eval_log" \
-      python eval_classifier.py \
+      python scripts/eval/eval_classifier.py \
       --weights "$ckpt_path" \
       --input "$CLS_TEST_DIR" \
       --config "$CLS_CONFIG" \
@@ -291,7 +291,7 @@ run_ret_experiment() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local train_args=(
-    python train_retrieval.py
+    python scripts/train/train_retrieval.py
     --train-dir "$RET_TRAIN_DIR"
     --valid-dir "$RET_VALID_DIR"
     --weights "$weights_path"
@@ -331,7 +331,7 @@ run_ret_experiment() {
     log "[SKIP][RET] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
   else
     run_logged "$eval_log" \
-      python eval_retrieval.py \
+      python scripts/eval/eval_retrieval.py \
       --input "$RET_TEST_DIR" \
       --config "$RET_CONFIG" \
       --model-name "$MODEL_NAME" \
@@ -372,7 +372,7 @@ run_seg_experiment() {
   mkdir -p "$train_dir" "$eval_dir"
 
   local train_args=(
-    python train_segmentation.py
+    python scripts/train/train_segmentation.py
     --train-images "$SEG_TRAIN_IMAGES"
     --train-masks "$SEG_TRAIN_MASKS"
     --valid-images "$SEG_VALID_IMAGES"
@@ -414,7 +414,7 @@ run_seg_experiment() {
     log "[SKIP][SEG] ${pretrain_label} unfreeze=${unfreeze_blocks} (eval outputs already exist)"
   else
     run_logged "$eval_log" \
-      python eval_segmentation.py \
+      python scripts/eval/eval_segmentation.py \
       --eval-images "$SEG_TEST_IMAGES" \
       --eval-masks "$SEG_TEST_MASKS" \
       --config "$SEG_CONFIG" \
@@ -487,7 +487,7 @@ for idx in "${PRETRAIN_INDEXES[@]}"; do
 done
 
 log "Generating summary curves and crossover table"
-python summarize_ft_curves.py \
+python scripts/analysis/ft_compare/summarize_ft_curves.py \
   --root "$EXPERIMENT_ROOT" \
   --model-name "$MODEL_NAME" \
   --out-dir "$SUMMARY_ROOT" \

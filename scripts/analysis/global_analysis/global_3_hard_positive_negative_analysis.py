@@ -35,7 +35,7 @@ import torch.nn.functional as F
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent.parent
+REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 PLOT_COLORS = {"imagenet": "#4C72B0", "cag": "#DD8452"}
 CONDITION_ORDER = [
     ("imagenet", "raw_frozen", "ImageNet Raw"),
