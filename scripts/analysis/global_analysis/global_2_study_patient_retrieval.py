@@ -49,6 +49,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.img_cls.model import Dinov3Backbone  # noqa: E402
+from src.img_cls.input_policy import (  # noqa: E402
+    INPUT_POLICY_BASELINE,
+    INPUT_POLICY_CHOICES,
+    build_eval_transform,
+    resolve_input_policy,
+)
 
 
 DEFAULT_IMAGENET_CKPT = (
@@ -410,19 +416,14 @@ def set_global_seed(seed: int, strict_deterministic: bool = False) -> None:
             torch.backends.cudnn.benchmark = False
 
 
-def build_transform(resize_size: int, center_crop_size: int) -> transforms.Compose:
-    return transforms.Compose(
-        [
-            transforms.ToPILImage(),
-            transforms.Resize((resize_size, resize_size)),
-            transforms.CenterCrop((center_crop_size, center_crop_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-            ),
-        ]
-    )
+def build_transform(
+    resize_size: int,
+    center_crop_size: int,
+    input_policy: str,
+    input_stats_json: str | None,
+) -> tuple[transforms.Compose, object]:
+    policy_spec = resolve_input_policy(input_policy, input_stats_json)
+    return build_eval_transform(resize_size, center_crop_size, policy_spec), policy_spec
 
 
 def collect_image_paths(root_dir: str, exts: Tuple[str, ...]) -> List[str]:
@@ -553,6 +554,7 @@ def extract_or_load_features(
     meta_path = out_root / f"features_{backbone_name}_{split_name}.meta.json"
     index_path = out_root / f"feature_index_{split_name}.csv"
     manifest_hash = hash_dataframe(manifest, ["image_id", "img_path"])
+    policy_spec = resolve_input_policy(args.input_policy, args.input_stats_json)
     expected_meta = {
         "manifest_hash": manifest_hash,
         "backbone_name": backbone_name,
@@ -563,6 +565,7 @@ def extract_or_load_features(
         "resize_size": int(args.resize_size),
         "center_crop_size": int(args.center_crop_size),
         "feature_source": "x_norm_clstoken",
+        **policy_spec.to_meta(),
     }
     if args.cache_features and features_path.exists() and meta_path.exists():
         with open(meta_path, "r", encoding="utf-8") as handle:
@@ -583,7 +586,12 @@ def extract_or_load_features(
         log(f"CUDA requested but unavailable. Falling back to CPU for {backbone_name}/{split_name}.")
         requested_device = "cpu"
 
-    transform = build_transform(args.resize_size, args.center_crop_size)
+    transform, _ = build_transform(
+        args.resize_size,
+        args.center_crop_size,
+        args.input_policy,
+        args.input_stats_json,
+    )
     dataset = ImagePathDataset(manifest["img_path"].tolist(), transform)
     loader = DataLoader(
         dataset,
@@ -1298,6 +1306,9 @@ def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, run_meta
     lines.append("")
     lines.append(f"- Dataset: `{run_meta['image_root']}`")
     lines.append(f"- Seed set (probe only): `{', '.join(str(v) for v in run_meta['probe_seed_set'])}`")
+    lines.append(f"- Input policy: `{run_meta['input_policy']}`")
+    lines.append(f"- Input norm mean: `{run_meta['input_norm_mean']}`")
+    lines.append(f"- Input norm std: `{run_meta['input_norm_std']}`")
     lines.append(f"- Targets: `patient`, `study`")
     lines.append(f"- Modes: `raw_frozen`, `probe_linear`")
     lines.append("")
@@ -1367,6 +1378,8 @@ def main() -> None:
     parser.add_argument("--resize-size", type=int, default=480)
     parser.add_argument("--center-crop-size", type=int, default=448)
     parser.add_argument("--feature-batch-size", type=int, default=128)
+    parser.add_argument("--input-policy", choices=INPUT_POLICY_CHOICES, default=INPUT_POLICY_BASELINE)
+    parser.add_argument("--input-stats-json", default=None)
     parser.add_argument("--probe-batch-size", type=int, default=128)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--max-images-per-split", type=int, default=None)
@@ -1393,6 +1406,7 @@ def main() -> None:
 
     try:
         set_global_seed(args.seed, strict_deterministic=args.strict_deterministic)
+        policy_spec = resolve_input_policy(args.input_policy, args.input_stats_json)
         log(f"Arguments: {json.dumps(vars(args), indent=2, sort_keys=True)}")
         steps = build_steps(args)
         run_tracker = AnalysisRunTracker(steps)
@@ -1571,6 +1585,7 @@ def main() -> None:
             "raw_summary_path": str((out_root / "summary_global_2_retrieval_raw.csv").resolve()),
             "probe_raw_summary_path": str((out_root / "summary_global_2_retrieval_probe_raw.csv").resolve()),
             "aggregate_summary_path": str((out_root / "summary_global_2_retrieval.csv").resolve()),
+            **policy_spec.to_meta(),
             "step_count": len(steps),
             "steps": [{"name": step.name, "kind": step.kind} for step in steps],
         }
