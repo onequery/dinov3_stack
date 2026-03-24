@@ -87,7 +87,7 @@ def plot_task(summary_df: pd.DataFrame, task: str, split: str, output_dir: Path)
     out_csv = output_dir / f"summary_input_v2_{task}_combined_{split}.csv"
     plot_df.to_csv(out_csv, index=False)
 
-    fig, axes = plt.subplots(1, len(cfg["metrics"]), figsize=(16, 4.8))
+    fig, axes = plt.subplots(1, len(cfg["metrics"]), figsize=(16.5, 5.6))
     if len(cfg["metrics"]) == 1:
         axes = [axes]
 
@@ -120,9 +120,16 @@ def plot_task(summary_df: pd.DataFrame, task: str, split: str, output_dir: Path)
         ax.grid(axis="y", alpha=0.2)
 
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False)
-    fig.suptitle(f"{task} ({split})", y=0.99)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.98),
+        ncol=2,
+        frameon=False,
+    )
+    fig.suptitle(f"{task} ({split})", y=1.06)
+    fig.tight_layout(rect=(0.02, 0.02, 1, 0.78))
     out_fig = output_dir / f"fig_input_v2_{task}_combined_{split}.png"
     fig.savefig(out_fig, dpi=300, bbox_inches="tight")
     plt.close(fig)
