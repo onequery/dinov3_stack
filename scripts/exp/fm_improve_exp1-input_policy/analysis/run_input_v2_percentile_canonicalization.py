@@ -308,10 +308,12 @@ def add_common_benchmark_args(
     cmd.extend(["--probe-patience", str(args.probe_patience)])
     if include_max_images_per_split and int(args.max_images_per_split) > 0:
         cmd.extend(["--max-images-per-split", str(args.max_images_per_split)])
-    for seed in parse_int_list(args.probe_seeds_str):
-        cmd.extend(["--probe-seeds", str(seed)])
-    for value in parse_float_list(args.probe_lr_grid_str):
-        cmd.extend(["--probe-lr-grid", str(value)])
+    probe_seeds = [str(seed) for seed in parse_int_list(args.probe_seeds_str)]
+    if probe_seeds:
+        cmd.extend(["--probe-seeds", *probe_seeds])
+    probe_lr_grid = [str(value) for value in parse_float_list(args.probe_lr_grid_str)]
+    if probe_lr_grid:
+        cmd.extend(["--probe-lr-grid", *probe_lr_grid])
     if args.cache_features:
         cmd.append("--cache-features")
     if args.strict_deterministic:
