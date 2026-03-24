@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -23,6 +24,20 @@ DEFAULT_OUTPUT_ROOT = (
 )
 PNG_EXT = ".png"
 POLICY_NAME = "input_v2_percentile_canonicalization"
+
+
+def log(message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [CACHE] {message}", flush=True)
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "estimating"
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 @dataclass(frozen=True)
@@ -69,7 +84,24 @@ def resolve_source_path(dataset_root: Path, raw_value: object) -> Path:
     candidate = Path(value)
     if candidate.is_absolute():
         return candidate.resolve()
-    return (dataset_root / candidate).resolve()
+
+    repo_option = (REPO_ROOT / candidate).resolve()
+    if repo_option.exists():
+        return repo_option
+
+    dataset_option = (dataset_root / candidate).resolve()
+    if dataset_option.exists():
+        return dataset_option
+
+    parts = candidate.parts
+    for split in ("train", "valid", "test"):
+        if split in parts:
+            split_relative = Path(*parts[parts.index(split):])
+            split_option = (dataset_root / split_relative).resolve()
+            if split_option.exists():
+                return split_option
+
+    return dataset_option
 
 
 def infer_relative_image_path(source_path: Path, dataset_root: Path) -> Path:
@@ -139,10 +171,17 @@ def validate_same_dicom_integrity(manifest_df: pd.DataFrame) -> pd.DataFrame:
 def build_cache_dataset(
     source_root: Path,
     output_root: Path,
+    *,
+    dataset_name: str,
+    progress_every: int = 250,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
     rows: list[dict[str, object]] = []
     split_counts: dict[str, int] = {}
-    for src_path in iter_png_paths(source_root):
+    png_paths = iter_png_paths(source_root)
+    total_images = len(png_paths)
+    started_at = time.time()
+    log(f"START dataset={dataset_name} | total_images={total_images} | source_root={source_root} | output_root={output_root}")
+    for index, src_path in enumerate(png_paths, start=1):
         rel_path = src_path.relative_to(source_root)
         dst_path = output_root / rel_path
         dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +201,18 @@ def build_cache_dataset(
                 "cached_path": str(dst_path.resolve()),
             }
         )
+        if index == 1 or index == total_images or index % progress_every == 0:
+            elapsed = max(1e-9, time.time() - started_at)
+            rate = index / elapsed
+            remaining = (total_images - index) / rate if rate > 0 else None
+            log(
+                f"PROGRESS dataset={dataset_name} | done={index}/{total_images} "
+                f"| elapsed={format_duration(elapsed)} | remaining_est={format_duration(remaining)}"
+            )
+    log(
+        f"DONE dataset={dataset_name} | total_images={total_images} "
+        f"| elapsed={format_duration(time.time() - started_at)}"
+    )
     return pd.DataFrame.from_records(rows), split_counts
 
 
@@ -182,8 +233,16 @@ def build_input_v2_cache(
     ensure_clean_dir(unique_cache_root, overwrite=overwrite)
     ensure_clean_dir(same_cache_root, overwrite=overwrite)
 
-    unique_manifest_df, unique_counts = build_cache_dataset(unique_view_root, unique_cache_root)
-    same_manifest_df, same_counts = build_cache_dataset(same_dicom_root, same_cache_root)
+    unique_manifest_df, unique_counts = build_cache_dataset(
+        unique_view_root,
+        unique_cache_root,
+        dataset_name="unique_view",
+    )
+    same_manifest_df, same_counts = build_cache_dataset(
+        same_dicom_root,
+        same_cache_root,
+        dataset_name="same_dicom",
+    )
 
     unique_manifest_path = output_root / "cache_manifest_unique_view.csv"
     same_cache_manifest_path = output_root / "cache_manifest_same_dicom.csv"

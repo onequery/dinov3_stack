@@ -3,6 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+cd "${ROOT_DIR}"
+
+CONDA_ENV="${CONDA_ENV:-dinov3_stack}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
+PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+export CUDA_VISIBLE_DEVICES
+export PYTHONUNBUFFERED
+
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/fm_improve_exp1-input_policy/input_v2_percentile_canonicalization/downstream_only}"
 UNIQUE_VIEW_ROOT="${UNIQUE_VIEW_ROOT:-input/Stent-Contrast-unique-view}"
 SAME_DICOM_ROOT="${SAME_DICOM_ROOT:-input/Stent-Contrast-same-dicom-unique-view}"
@@ -25,10 +33,8 @@ SKIP_SUMMARY="${SKIP_SUMMARY:-0}"
 SKIP_PLOT="${SKIP_PLOT:-0}"
 PASS_OVERWRITE="${PASS_OVERWRITE:-0}"
 
-cd "${ROOT_DIR}"
-
 CMD=(
-  python
+  conda run --no-capture-output -n "${CONDA_ENV}" python -u
   scripts/exp/fm_improve_exp1-input_policy/analysis/run_input_v2_percentile_canonicalization.py
   --output-root "${OUTPUT_ROOT}"
   --unique-view-root "${UNIQUE_VIEW_ROOT}"

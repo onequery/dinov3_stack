@@ -461,11 +461,14 @@ def main() -> None:
 
     cache_root = output_root / "input_v2" / "cache"
     if args.skip_cache:
+        log(f"SKIP cache build | cache_root={cache_root}")
         variant_unique_root = cache_root / "unique_view"
         variant_same_root = cache_root / "same_dicom"
         variant_same_manifest = variant_same_root / "manifest_same_dicom_master.csv"
         cache_metadata = cache_root / "cache_metadata.json"
     else:
+        cache_started_at = time.time()
+        log(f"START cache build | cache_root={cache_root}")
         outputs = build_input_v2_cache(
             unique_view_root=baseline_unique_root,
             same_dicom_root=baseline_same_root,
@@ -477,6 +480,10 @@ def main() -> None:
         variant_same_root = outputs.same_dicom_root
         variant_same_manifest = outputs.same_dicom_manifest
         cache_metadata = outputs.metadata_json
+        log(
+            f"DONE cache build | elapsed={format_duration(time.time() - cache_started_at)} "
+            f"| cache_metadata_json={cache_metadata}"
+        )
 
     env = build_env()
     runs = build_benchmark_runs(
