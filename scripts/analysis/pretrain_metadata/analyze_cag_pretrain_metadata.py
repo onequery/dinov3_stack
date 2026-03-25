@@ -176,12 +176,33 @@ def register_field(
         source=source,
         is_derived=int(bool(is_derived)),
     )
-    existing = field_specs.get(field_name)
-    if existing is None:
-        field_specs[field_name] = spec
-        return
-    if existing != spec:
-        raise ValueError(f"Field spec conflict for {field_name}: {existing} vs {spec}")
+    merge_field_spec(field_specs, spec)
+
+
+def reconcile_field_specs(existing: FieldSpec | None, candidate: FieldSpec) -> FieldSpec:
+    if existing is None or existing == candidate:
+        return candidate
+    compatible_identity = (
+        existing.field_name == candidate.field_name
+        and existing.field_group == candidate.field_group
+        and existing.source == candidate.source
+        and existing.is_derived == candidate.is_derived
+    )
+    if compatible_identity and {existing.field_type, candidate.field_type} == {"continuous", "categorical"}:
+        original_name = existing.original_name if existing.original_name == candidate.original_name else existing.original_name or candidate.original_name
+        return FieldSpec(
+            field_name=existing.field_name,
+            original_name=original_name,
+            field_type="categorical",
+            field_group=existing.field_group,
+            source=existing.source,
+            is_derived=existing.is_derived,
+        )
+    raise ValueError(f"Field spec conflict for {candidate.field_name}: {existing} vs {candidate}")
+
+
+def merge_field_spec(field_specs: Dict[str, FieldSpec], spec: FieldSpec) -> None:
+    field_specs[spec.field_name] = reconcile_field_specs(field_specs.get(spec.field_name), spec)
 
 
 def clean_categorical(value: object) -> str | None:
@@ -380,7 +401,111 @@ def ordered_columns(columns: Iterable[str]) -> list[str]:
     return [col for col in ID_COLUMNS if col in columns] + others
 
 
-def build_subtasks(image_root: Path, splits: Sequence[str], max_images_per_subtask: int) -> list[SubtaskDef]:
+def get_enumeration_cache_paths(output_root: Path) -> tuple[Path, Path]:
+    cache_dir = output_root / "enumeration_cache"
+    meta_path = cache_dir / "meta.json"
+    return cache_dir, meta_path
+
+
+def try_load_enumeration_cache(
+    image_root: Path,
+    output_root: Path,
+    splits: Sequence[str],
+    max_images_per_subtask: int,
+) -> list[SubtaskDef] | None:
+    cache_dir, meta_path = get_enumeration_cache_paths(output_root)
+    if not meta_path.exists():
+        return None
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"ENUMERATE CACHE MISS | reason=meta_read_error | detail={type(exc).__name__}: {exc}")
+        return None
+    expected = {
+        "version": 1,
+        "image_root": str(image_root.resolve()),
+        "splits": list(splits),
+        "frame_types": list(FRAME_TYPES),
+        "max_images_per_subtask": int(max_images_per_subtask),
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            log(f"ENUMERATE CACHE MISS | reason=config_mismatch | key={key}")
+            return None
+    subtasks_payload = payload.get("subtasks", [])
+    subtasks: list[SubtaskDef] = []
+    total_expected = len(subtasks_payload)
+    load_start = time.time()
+    for idx, item in enumerate(subtasks_payload, start=1):
+        split = item["split"]
+        frame_type = item["frame_type"]
+        image_dir = Path(item["image_dir"])
+        manifest_file = cache_dir / item["manifest_file"]
+        if not manifest_file.exists():
+            log(f"ENUMERATE CACHE MISS | reason=missing_manifest | split={split} frame_type={frame_type}")
+            return None
+        names = manifest_file.read_text(encoding="utf-8").splitlines()
+        image_paths = tuple(image_dir / name for name in names if name)
+        subtasks.append(SubtaskDef(split=split, frame_type=frame_type, image_dir=image_dir, image_paths=image_paths))
+        elapsed = time.time() - load_start
+        remaining = estimate_remaining(elapsed, idx, total_expected)
+        log(
+            f"[ENUMERATE] CACHE | split={split} frame_type={frame_type} | images={len(image_paths)} | "
+            f"subtasks_done={idx}/{total_expected} | elapsed={format_duration(elapsed)} | "
+            f"remaining={format_duration(remaining) if math.isfinite(remaining) else 'n/a'}"
+        )
+    log(f"ENUMERATE CACHE HIT | subtasks={len(subtasks)} | total_images={sum(s.image_count for s in subtasks)}")
+    return subtasks
+
+
+def save_enumeration_cache(
+    output_root: Path,
+    image_root: Path,
+    splits: Sequence[str],
+    max_images_per_subtask: int,
+    subtasks: Sequence[SubtaskDef],
+) -> None:
+    cache_dir, meta_path = get_enumeration_cache_paths(output_root)
+    ensure_dir(cache_dir)
+    payload_subtasks: list[dict[str, object]] = []
+    for subtask in subtasks:
+        manifest_name = f"{subtask.key}.txt"
+        manifest_path = cache_dir / manifest_name
+        manifest_path.write_text("\n".join(path.name for path in subtask.image_paths) + "\n", encoding="utf-8")
+        payload_subtasks.append(
+            {
+                "split": subtask.split,
+                "frame_type": subtask.frame_type,
+                "image_dir": str(subtask.image_dir),
+                "image_count": int(subtask.image_count),
+                "manifest_file": manifest_name,
+            }
+        )
+    atomic_write_json(
+        meta_path,
+        {
+            "version": 1,
+            "image_root": str(image_root.resolve()),
+            "splits": list(splits),
+            "frame_types": list(FRAME_TYPES),
+            "max_images_per_subtask": int(max_images_per_subtask),
+            "subtasks": payload_subtasks,
+        },
+    )
+
+
+def build_subtasks(
+    image_root: Path,
+    splits: Sequence[str],
+    max_images_per_subtask: int,
+    output_root: Path,
+    refresh_enumeration_cache: bool,
+) -> list[SubtaskDef]:
+    if not refresh_enumeration_cache:
+        cached = try_load_enumeration_cache(image_root, output_root, splits, max_images_per_subtask)
+        if cached is not None:
+            return cached
+
     subtasks: list[SubtaskDef] = []
     total_expected = len(splits) * len(FRAME_TYPES)
     enumerate_start = time.time()
@@ -418,6 +543,7 @@ def build_subtasks(image_root: Path, splits: Sequence[str], max_images_per_subta
                 f"subtasks_done={subtasks_done}/{total_expected} | elapsed={format_duration(elapsed)} | "
                 f"remaining={format_duration(remaining) if math.isfinite(remaining) else 'n/a'}"
             )
+    save_enumeration_cache(output_root, image_root, splits, max_images_per_subtask, subtasks)
     return subtasks
 
 
@@ -480,7 +606,7 @@ def process_single_image(args: tuple[Path, Path, str, str, Path]) -> tuple[dict[
     field_specs: Dict[str, FieldSpec] = {}
     image_stats, image_specs = compute_basic_image_attributes(img_path)
     for spec in image_specs.values():
-        field_specs[spec.field_name] = spec
+        merge_field_spec(field_specs, spec)
     row.update(image_stats)
 
     parsed = parse_image_filename(img_path.name)
@@ -509,7 +635,7 @@ def process_single_image(args: tuple[Path, Path, str, str, Path]) -> tuple[dict[
         return row, [asdict(spec) for spec in field_specs.values()]
 
     for spec in dicom_specs.values():
-        field_specs[spec.field_name] = spec
+        merge_field_spec(field_specs, spec)
     row.update(meta)
     return row, [asdict(spec) for spec in field_specs.values()]
 
@@ -539,11 +665,7 @@ def extract_one_subtask(
             rows.append(row)
             for raw_spec in specs:
                 spec = FieldSpec(**raw_spec)
-                existing = merged_specs.get(spec.field_name)
-                if existing is None:
-                    merged_specs[spec.field_name] = spec
-                elif existing != spec:
-                    raise ValueError(f"Field spec conflict for {spec.field_name}: {existing} vs {spec}")
+                merge_field_spec(merged_specs, spec)
             subtask_done += 1
             total_done_ref[0] += 1
             if subtask_done == subtask_total or (log_every > 0 and subtask_done % log_every == 0):
@@ -568,11 +690,7 @@ def load_field_specs_from_json(path: Path) -> Dict[str, FieldSpec]:
     out: Dict[str, FieldSpec] = {}
     for raw in payload:
         spec = FieldSpec(**raw)
-        existing = out.get(spec.field_name)
-        if existing is None:
-            out[spec.field_name] = spec
-        elif existing != spec:
-            raise ValueError(f"Field spec conflict for {spec.field_name}: {existing} vs {spec}")
+        merge_field_spec(out, spec)
     return out
 
 
@@ -856,6 +974,7 @@ def render_markdown_report(
     lines.append("- `summary_status_counts.csv`")
     lines.append("- `summary_missingness_by_field.csv`")
     lines.append("- `summary_dicom_resolution_failures.csv`")
+    lines.append("- `enumeration_cache/meta.json`")
     lines.append("")
     (output_root / "analysis_cag_pretrain_metadata.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -869,12 +988,8 @@ def combine_subtask_outputs(subtasks: Sequence[SubtaskDef], per_image_dir: Path)
         if not csv_path.exists():
             raise FileNotFoundError(csv_path)
         dfs.append(pd.read_csv(csv_path, low_memory=False))
-        for field_name, spec in load_field_specs_from_json(spec_path).items():
-            existing = field_specs.get(field_name)
-            if existing is None:
-                field_specs[field_name] = spec
-            elif existing != spec:
-                raise ValueError(f"Field spec conflict for {field_name}: {existing} vs {spec}")
+        for _field_name, spec in load_field_specs_from_json(spec_path).items():
+            merge_field_spec(field_specs, spec)
     manifest = pd.concat(dfs, ignore_index=True, sort=False) if dfs else pd.DataFrame(columns=ID_COLUMNS)
     if not manifest.empty:
         manifest = manifest.loc[:, ordered_columns(manifest.columns)]
@@ -892,6 +1007,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=200)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--max-images-per-subtask", type=int, default=0)
+    parser.add_argument("--refresh-enumeration-cache", action="store_true")
     return parser.parse_args()
 
 
@@ -914,6 +1030,7 @@ def main() -> None:
                     "log_every": int(args.log_every),
                     "resume": bool(args.resume),
                     "max_images_per_subtask": int(args.max_images_per_subtask),
+                    "refresh_enumeration_cache": bool(args.refresh_enumeration_cache),
                     "log_path": str(log_path),
                 },
                 indent=2,
@@ -922,7 +1039,7 @@ def main() -> None:
 
         stage_start = time.time()
         log("ENUMERATE START")
-        subtasks = build_subtasks(args.image_root.resolve(), list(args.splits), int(args.max_images_per_subtask))
+        subtasks = build_subtasks(args.image_root.resolve(), list(args.splits), int(args.max_images_per_subtask), output_root, bool(args.refresh_enumeration_cache))
         total_images = sum(subtask.image_count for subtask in subtasks)
         log(f"ENUMERATE DONE | subtasks={len(subtasks)} | total_images={total_images} | elapsed={format_duration(time.time() - stage_start)}")
 

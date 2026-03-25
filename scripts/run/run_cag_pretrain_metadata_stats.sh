@@ -12,6 +12,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/cag_pretrain_metadata_stats}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 LOG_EVERY="${LOG_EVERY:-200}"
 MAX_IMAGES_PER_SUBTASK="${MAX_IMAGES_PER_SUBTASK:-0}"
+REFRESH_ENUMERATION_CACHE="${REFRESH_ENUMERATION_CACHE:-0}"
 
 CMD=(
   conda run --no-capture-output -n "${CONDA_ENV}" python -u
@@ -25,6 +26,10 @@ CMD=(
   --resume
   --max-images-per-subtask "${MAX_IMAGES_PER_SUBTASK}"
 )
+
+if [[ "${REFRESH_ENUMERATION_CACHE}" == "1" ]]; then
+  CMD+=(--refresh-enumeration-cache)
+fi
 
 echo "ROOT_DIR=${ROOT_DIR}"
 echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
