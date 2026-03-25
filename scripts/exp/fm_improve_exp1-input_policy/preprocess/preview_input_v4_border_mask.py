@@ -8,11 +8,12 @@ import cv2
 import numpy as np
 
 # Prototype fixed valid-ROI definition for the observed circular FOV.
-# These parameters are easy to adjust after visual inspection.
 DEFAULT_CENTER_X = 256
 DEFAULT_CENTER_Y = 256
 DEFAULT_RADIUS = 332
 DEFAULT_FILL_VALUE = 0
+DEFAULT_BLUR_SIGMA = 25.0
+DEFAULT_FEATHER_WIDTH = 18
 
 
 def build_valid_roi_mask(height: int, width: int, center_x: int, center_y: int, radius: int) -> np.ndarray:
@@ -20,10 +21,28 @@ def build_valid_roi_mask(height: int, width: int, center_x: int, center_y: int, 
     return (xx - center_x) ** 2 + (yy - center_y) ** 2 <= radius ** 2
 
 
-def apply_border_suppression(image: np.ndarray, mask: np.ndarray, fill_value: int) -> np.ndarray:
-    out = image.copy()
-    out[~mask] = np.uint8(fill_value)
-    return out
+def estimate_background_field(image: np.ndarray, mask: np.ndarray, blur_sigma: float) -> np.ndarray:
+    image_f = image.astype(np.float32)
+    mask_f = mask.astype(np.float32)
+    weighted = image_f * mask_f
+    blurred_weighted = cv2.GaussianBlur(weighted, ksize=(0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma)
+    blurred_mask = cv2.GaussianBlur(mask_f, ksize=(0, 0), sigmaX=blur_sigma, sigmaY=blur_sigma)
+    background = blurred_weighted / np.maximum(blurred_mask, 1e-6)
+    return np.clip(background, 0, 255)
+
+
+def build_feather_alpha(mask: np.ndarray, feather_width: int) -> np.ndarray:
+    dist_inside = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    alpha = np.clip(dist_inside / max(float(feather_width), 1.0), 0.0, 1.0)
+    return alpha.astype(np.float32)
+
+
+def apply_border_suppression(image: np.ndarray, mask: np.ndarray, blur_sigma: float, feather_width: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    background = estimate_background_field(image=image, mask=mask, blur_sigma=blur_sigma)
+    alpha = build_feather_alpha(mask=mask, feather_width=feather_width)
+    image_f = image.astype(np.float32)
+    blended = alpha * image_f + (1.0 - alpha) * background
+    return np.clip(blended, 0, 255).astype(np.uint8), background.astype(np.uint8), (alpha * 255.0).astype(np.uint8)
 
 
 def overlay_mask_boundary(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -66,7 +85,8 @@ def process_images(
     center_x: int,
     center_y: int,
     radius: int,
-    fill_value: int,
+    blur_sigma: float,
+    feather_width: int,
     repo_root: Path,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,7 +97,12 @@ def process_images(
             raise FileNotFoundError(f'Failed to read image: {image_path}')
         h, w = image.shape
         mask = build_valid_roi_mask(h, w, center_x=center_x, center_y=center_y, radius=radius)
-        suppressed = apply_border_suppression(image, mask, fill_value=fill_value)
+        suppressed, background, alpha = apply_border_suppression(
+            image=image,
+            mask=mask,
+            blur_sigma=blur_sigma,
+            feather_width=feather_width,
+        )
         overlay = overlay_mask_boundary(image, mask)
         panel = make_panel(image, suppressed, overlay)
 
@@ -86,11 +111,15 @@ def process_images(
         out_overlay = output_dir / f'{stem}_overlay.png'
         out_panel = output_dir / f'{stem}_panel.png'
         out_mask = output_dir / f'{stem}_mask.png'
+        out_background = output_dir / f'{stem}_background.png'
+        out_alpha = output_dir / f'{stem}_alpha.png'
 
         cv2.imwrite(str(out_suppressed), suppressed)
         cv2.imwrite(str(out_overlay), overlay)
         cv2.imwrite(str(out_panel), panel)
         cv2.imwrite(str(out_mask), mask.astype(np.uint8) * 255)
+        cv2.imwrite(str(out_background), background)
+        cv2.imwrite(str(out_alpha), alpha)
 
         rows.append(
             ','.join(
@@ -101,6 +130,8 @@ def process_images(
                     str(center_x),
                     str(center_y),
                     str(radius),
+                    f'{blur_sigma:.2f}',
+                    str(feather_width),
                     str(int(mask.sum())),
                     str(int((~mask).sum())),
                     relative_name(out_panel, repo_root),
@@ -110,7 +141,7 @@ def process_images(
 
     summary_path = output_dir / 'preview_summary.csv'
     summary_path.write_text(
-        'image_path,height,width,center_x,center_y,radius,valid_pixels,invalid_pixels,panel_path\n' + '\n'.join(rows) + '\n',
+        'image_path,height,width,center_x,center_y,radius,blur_sigma,feather_width,valid_pixels,invalid_pixels,panel_path\n' + '\n'.join(rows) + '\n',
         encoding='utf-8',
     )
 
@@ -121,7 +152,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--center-x', type=int, default=DEFAULT_CENTER_X)
     parser.add_argument('--center-y', type=int, default=DEFAULT_CENTER_Y)
     parser.add_argument('--radius', type=int, default=DEFAULT_RADIUS)
-    parser.add_argument('--fill-value', type=int, default=DEFAULT_FILL_VALUE)
+    parser.add_argument('--blur-sigma', type=float, default=DEFAULT_BLUR_SIGMA)
+    parser.add_argument('--feather-width', type=int, default=DEFAULT_FEATHER_WIDTH)
     parser.add_argument('images', nargs='+', type=Path)
     return parser.parse_args()
 
@@ -135,7 +167,8 @@ def main() -> None:
         center_x=args.center_x,
         center_y=args.center_y,
         radius=args.radius,
-        fill_value=args.fill_value,
+        blur_sigma=args.blur_sigma,
+        feather_width=args.feather_width,
         repo_root=repo_root,
     )
     print(f'Wrote preview outputs to {args.output_dir}')
