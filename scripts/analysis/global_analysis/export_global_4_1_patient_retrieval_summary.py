@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export GA4-1 patient retrieval benchmark-style summary from GA2 outputs."""
+"""Export patient retrieval benchmark-style summary from GA2 outputs."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def make_grouped_bar_positions(group_count: int, bar_count: int, width: float = 
     return centers, offsets
 
 
-def save_map_compare_figure(summary_df: pd.DataFrame, output_path: Path) -> None:
+def save_map_compare_figure(summary_df: pd.DataFrame, output_path: Path, analysis_title: str) -> None:
     plot_df = summary_df[(summary_df["split"] == "test") & (summary_df["target"] == TARGET_NAME)].copy()
     conditions = [
         ("imagenet", "raw_frozen", "ImageNet Raw"),
@@ -60,14 +60,14 @@ def save_map_compare_figure(summary_df: pd.DataFrame, output_path: Path) -> None
         if np.isfinite(value):
             plt.text(bar.get_x() + bar.get_width() / 2.0, value, f"{value:.4f}", ha="center", va="bottom")
     plt.ylabel("mAP")
-    plt.title("Global Analysis 4-1: Patient Retrieval mAP")
+    plt.title(f"{analysis_title}: Patient Retrieval mAP")
     plt.grid(axis="y", alpha=0.25)
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def save_recall_compare_figure(summary_df: pd.DataFrame, output_path: Path) -> None:
+def save_recall_compare_figure(summary_df: pd.DataFrame, output_path: Path, analysis_title: str) -> None:
     plot_df = summary_df[(summary_df["split"] == "test") & (summary_df["target"] == TARGET_NAME)].copy()
     ks = [1, 5, 10]
     conditions = [
@@ -92,7 +92,7 @@ def save_recall_compare_figure(summary_df: pd.DataFrame, output_path: Path) -> N
         plt.bar(xs[idx], means, width=0.18, color=PLOT_COLORS[backbone_name], alpha=0.55 if mode == "raw_frozen" else 0.95, yerr=errs, capsize=4, label=label)
     plt.xticks(centers, ["R@1", "R@5", "R@10"])
     plt.ylabel("Recall@K")
-    plt.title("Global Analysis 4-1: Patient Retrieval Recall@K")
+    plt.title(f"{analysis_title}: Patient Retrieval Recall@K")
     plt.grid(axis="y", alpha=0.25)
     plt.legend(ncols=2)
     plt.tight_layout()
@@ -107,7 +107,12 @@ def build_cdf(points: np.ndarray, max_rank: int) -> np.ndarray:
     return np.asarray([(points <= x).mean() for x in xs], dtype=np.float64)
 
 
-def save_rank_cdf_figure(raw_rank_map: Dict[str, np.ndarray], probe_rank_map: Dict[str, List[np.ndarray]], output_path: Path) -> None:
+def save_rank_cdf_figure(
+    raw_rank_map: Dict[str, np.ndarray],
+    probe_rank_map: Dict[str, List[np.ndarray]],
+    output_path: Path,
+    analysis_title: str,
+) -> None:
     plt.figure(figsize=(8, 5))
     max_rank = 1
     for backbone_name in ["imagenet", "cag"]:
@@ -132,7 +137,7 @@ def save_rank_cdf_figure(raw_rank_map: Dict[str, np.ndarray], probe_rank_map: Di
             plt.fill_between(xs, np.clip(mean - std, 0.0, 1.0), np.clip(mean + std, 0.0, 1.0), color=color, alpha=0.18)
     plt.xlabel("First Positive Rank")
     plt.ylabel("Query Ratio (CDF)")
-    plt.title("Global Analysis 4-1: Patient First Positive Rank CDF")
+    plt.title(f"{analysis_title}: Patient First Positive Rank CDF")
     plt.grid(alpha=0.25)
     plt.legend(ncols=2)
     plt.tight_layout()
@@ -140,7 +145,7 @@ def save_rank_cdf_figure(raw_rank_map: Dict[str, np.ndarray], probe_rank_map: Di
     plt.close()
 
 
-def save_probe_minus_raw_delta_figure(summary_df: pd.DataFrame, output_path: Path) -> None:
+def save_probe_minus_raw_delta_figure(summary_df: pd.DataFrame, output_path: Path, analysis_title: str) -> None:
     plot_df = summary_df[(summary_df["split"] == "test") & (summary_df["target"] == TARGET_NAME)].copy()
     labels = ["ImageNet", "CAG"]
     xs = np.arange(len(labels))
@@ -164,17 +169,17 @@ def save_probe_minus_raw_delta_figure(summary_df: pd.DataFrame, output_path: Pat
             plt.text(bar.get_x() + bar.get_width() / 2.0, value, f"{value:+.4f}", ha="center", va="bottom")
     plt.xticks(xs, labels)
     plt.ylabel("Probe mAP - Raw mAP")
-    plt.title("Global Analysis 4-1: Probe Improvement over Raw Retrieval")
+    plt.title(f"{analysis_title}: Probe Improvement over Raw Retrieval")
     plt.grid(axis="y", alpha=0.25)
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, source_root: Path) -> None:
+def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, source_root: Path, analysis_title: str) -> None:
     test_df = summary_df[summary_df["split"] == "test"].copy()
     lines = []
-    lines.append("# Global Analysis 4-1: Patient Retrieval")
+    lines.append(f"# {analysis_title}: Patient Retrieval")
     lines.append("")
     lines.append("## Setup")
     lines.append("")
@@ -201,7 +206,7 @@ def write_markdown_summary(output_path: Path, summary_df: pd.DataFrame, source_r
     lines.append("")
     lines.append("- `raw도 높음` -> patient identity is already linearly accessible in frozen CLS features.")
     lines.append("- `raw 약함 + probe 회복` -> patient signal exists but frozen global geometry is poorly organized for retrieval.")
-    lines.append("- `CAG probe < ImageNet probe` -> later GA4-1 anchoring 결과와 연결해 global organization weakness를 해석할 수 있다.")
+    lines.append("- `CAG probe < ImageNet probe` -> later anchoring 결과와 연결해 global organization weakness를 해석할 수 있다.")
     lines.append("")
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -210,6 +215,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", default="outputs/global_2_study_patient_retrieval_unique_view")
     parser.add_argument("--output-root", default="outputs/global_4_1_patient_retrieval_unique_view")
+    parser.add_argument("--analysis-title", default="Global Analysis 4-1")
+    parser.add_argument("--summary-prefix", default="summary_global_4_1")
+    parser.add_argument("--figure-prefix", default="fig_global4_1")
+    parser.add_argument("--markdown-name", default="analysis_global_4_1_patient_retrieval.md")
+    parser.add_argument("--probe-seeds", type=int, nargs="+", default=[11, 22, 33])
     args = parser.parse_args()
 
     source_root = Path(args.source_root).resolve()
@@ -224,26 +234,35 @@ def main() -> None:
     raw_patient = raw_df[raw_df["target"] == TARGET_NAME].copy().reset_index(drop=True)
     probe_patient = probe_raw_df[probe_raw_df["target"] == TARGET_NAME].copy().reset_index(drop=True)
 
-    summary_patient.to_csv(output_root / "summary_global_4_1_patient_retrieval.csv", index=False)
-    raw_patient.to_csv(output_root / "summary_global_4_1_patient_retrieval_raw.csv", index=False)
-    probe_patient.to_csv(output_root / "summary_global_4_1_patient_retrieval_probe_raw.csv", index=False)
+    summary_patient.to_csv(output_root / f"{args.summary_prefix}_patient_retrieval.csv", index=False)
+    raw_patient.to_csv(output_root / f"{args.summary_prefix}_patient_retrieval_raw.csv", index=False)
+    probe_patient.to_csv(output_root / f"{args.summary_prefix}_patient_retrieval_probe_raw.csv", index=False)
 
     raw_rank_map: Dict[str, np.ndarray] = {}
     probe_rank_map: Dict[str, List[np.ndarray]] = {"imagenet": [], "cag": []}
     for backbone_name in ["imagenet", "cag"]:
         raw_per_query = pd.read_csv(source_root / f"per_query_patient_raw_{backbone_name}_test.csv")
         raw_rank_map[backbone_name] = pd.to_numeric(raw_per_query["first_positive_rank"], errors="coerce").dropna().to_numpy(dtype=np.int32)
-        for seed in [11, 22, 33]:
+        for seed in args.probe_seeds:
             probe_per_query = pd.read_csv(source_root / f"per_query_patient_probe_seed{seed}_{backbone_name}_test.csv")
             probe_rank_map[backbone_name].append(
                 pd.to_numeric(probe_per_query["first_positive_rank"], errors="coerce").dropna().to_numpy(dtype=np.int32)
             )
 
-    save_map_compare_figure(summary_patient, output_root / "fig_global4_1_map_compare.png")
-    save_recall_compare_figure(summary_patient, output_root / "fig_global4_1_recall_at_k_compare.png")
-    save_rank_cdf_figure(raw_rank_map, probe_rank_map, output_root / "fig_global4_1_rank_cdf_compare.png")
-    save_probe_minus_raw_delta_figure(summary_patient, output_root / "fig_global4_1_probe_minus_raw_delta.png")
-    write_markdown_summary(output_root / "analysis_global_4_1_patient_retrieval.md", summary_patient, source_root)
+    save_map_compare_figure(summary_patient, output_root / f"{args.figure_prefix}_map_compare.png", args.analysis_title)
+    save_recall_compare_figure(summary_patient, output_root / f"{args.figure_prefix}_recall_at_k_compare.png", args.analysis_title)
+    save_rank_cdf_figure(
+        raw_rank_map,
+        probe_rank_map,
+        output_root / f"{args.figure_prefix}_rank_cdf_compare.png",
+        args.analysis_title,
+    )
+    save_probe_minus_raw_delta_figure(
+        summary_patient,
+        output_root / f"{args.figure_prefix}_probe_minus_raw_delta.png",
+        args.analysis_title,
+    )
+    write_markdown_summary(output_root / args.markdown_name, summary_patient, source_root, args.analysis_title)
 
 
 if __name__ == "__main__":
