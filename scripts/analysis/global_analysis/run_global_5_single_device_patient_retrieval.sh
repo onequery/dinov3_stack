@@ -11,8 +11,8 @@ PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 IMAGE_ROOT="${IMAGE_ROOT:-input/global_analysis_5_philips_integris_h_unique_view_subset/images}"
 DCM_ROOT="${DCM_ROOT:-input/global_analysis_5_philips_integris_h_unique_view_subset/dicoms}"
-RETRIEVAL_ROOT="${RETRIEVAL_ROOT:-outputs/global_5_single_device_patient_retrieval_philips_integris_h_unique_view}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/analysis2_rep_analysis/global_5_single_device_patient_retrieval_philips_integris_h_unique_view}"
+RETRIEVAL_ROOT="${RETRIEVAL_ROOT:-${OUTPUT_ROOT}/retrieval_benchmark}"
 LOG_FILE="${LOG_FILE:-}"
 
 MODEL_NAME="${MODEL_NAME:-dinov3_vits16}"

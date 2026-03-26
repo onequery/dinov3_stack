@@ -18,8 +18,8 @@ REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
 DEFAULT_IMAGE_ROOT = REPO_ROOT / "input/global_analysis_5_philips_integris_h_unique_view_subset/images"
 DEFAULT_DCM_ROOT = REPO_ROOT / "input/global_analysis_5_philips_integris_h_unique_view_subset/dicoms"
-DEFAULT_RETRIEVAL_ROOT = REPO_ROOT / "outputs/global_5_single_device_patient_retrieval_philips_integris_h_unique_view"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs/analysis2_rep_analysis/global_5_single_device_patient_retrieval_philips_integris_h_unique_view"
+DEFAULT_RETRIEVAL_ROOT = DEFAULT_OUTPUT_ROOT / "retrieval_benchmark"
 DEFAULT_IMAGENET_CKPT = (
     "dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/"
     "3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth"
