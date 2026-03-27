@@ -16,9 +16,9 @@ from typing import TextIO
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent.parent
 
-DEFAULT_IMAGE_ROOT = REPO_ROOT / "input/global_analysis_5_philips_integris_h_unique_view_subset/images"
-DEFAULT_DCM_ROOT = REPO_ROOT / "input/global_analysis_5_philips_integris_h_unique_view_subset/dicoms"
-DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs/analysis2_rep_analysis/global_5_single_device_patient_retrieval_philips_integris_h_unique_view"
+DEFAULT_IMAGE_ROOT = REPO_ROOT / "input/global_analysis_5_per_device_patient_retrieval/philips_integris_h_unique_view_subset/images"
+DEFAULT_DCM_ROOT = REPO_ROOT / "input/global_analysis_5_per_device_patient_retrieval/philips_integris_h_unique_view_subset/dicoms"
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs/analysis2_rep_analysis/global_5_per_device_patient_retrieval/philips_integris_h"
 DEFAULT_RETRIEVAL_ROOT = DEFAULT_OUTPUT_ROOT / "retrieval_benchmark"
 DEFAULT_IMAGENET_CKPT = (
     "dinov3/output/a6000/1_pretrain/dinov3_vits16/2_imagenet1k/"

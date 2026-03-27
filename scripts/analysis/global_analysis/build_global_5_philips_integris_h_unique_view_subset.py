@@ -315,7 +315,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build a single-device subset of Stent-Contrast unique-view for Global Analysis 5.")
     parser.add_argument("--image-root", type=Path, default=REPO_ROOT / "input/Stent-Contrast-unique-view")
     parser.add_argument("--dicom-root", type=Path, default=REPO_ROOT / "input/stent_split_dcm_unique_view")
-    parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "input/global_analysis_5_philips_integris_h_unique_view_subset")
+    parser.add_argument("--output-root", type=Path, default=REPO_ROOT / "input/global_analysis_5_per_device_patient_retrieval/philips_integris_h_unique_view_subset")
     parser.add_argument("--log-every", type=int, default=200)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
