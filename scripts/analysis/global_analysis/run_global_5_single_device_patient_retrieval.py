@@ -28,6 +28,13 @@ DEFAULT_CAG_CKPT = (
     "dinov3/output/a6000/1_pretrain/dinov3_vits16/3_cagcontfm3m/"
     "3_stage3_high_res_adapt/eval/training_29999/teacher_checkpoint.pth"
 )
+DEFAULT_ANALYSIS_TITLE = "Global Analysis 5"
+DEFAULT_ANALYSIS_NAME = "global_5_single_device_patient_retrieval_philips_integris_h_unique_view"
+DEFAULT_SUMMARY_PREFIX = "summary_global_5"
+DEFAULT_FIGURE_PREFIX = "fig_global5"
+DEFAULT_PATIENT_MARKDOWN_NAME = "analysis_global_5_patient_retrieval.md"
+DEFAULT_ANCHORING_MARKDOWN_NAME = "analysis_global_5_cluster_anchoring_attribution.md"
+DEFAULT_ANCHORING_LOG_PREFIX = "global_5_cluster_anchoring_attribution"
 
 
 class TeeStream:
@@ -213,6 +220,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval-root", default=str(DEFAULT_RETRIEVAL_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--log-file", default=None)
+    parser.add_argument("--analysis-title", default=DEFAULT_ANALYSIS_TITLE)
+    parser.add_argument("--analysis-name", default=DEFAULT_ANALYSIS_NAME)
+    parser.add_argument("--summary-prefix", default=DEFAULT_SUMMARY_PREFIX)
+    parser.add_argument("--figure-prefix", default=DEFAULT_FIGURE_PREFIX)
+    parser.add_argument("--patient-markdown-name", default=DEFAULT_PATIENT_MARKDOWN_NAME)
+    parser.add_argument("--anchoring-markdown-name", default=DEFAULT_ANCHORING_MARKDOWN_NAME)
+    parser.add_argument("--anchoring-log-prefix", default=DEFAULT_ANCHORING_LOG_PREFIX)
     parser.add_argument("--imagenet-ckpt", default=DEFAULT_IMAGENET_CKPT)
     parser.add_argument("--cag-ckpt", default=DEFAULT_CAG_CKPT)
     parser.add_argument("--model-name", default="dinov3_vits16")
@@ -323,13 +337,13 @@ def main() -> None:
             "--output-root",
             str(output_root),
             "--analysis-title",
-            "Global Analysis 5",
+            str(args.analysis_title),
             "--summary-prefix",
-            "summary_global_5",
+            str(args.summary_prefix),
             "--figure-prefix",
-            "fig_global5",
+            str(args.figure_prefix),
             "--markdown-name",
-            "analysis_global_5_patient_retrieval.md",
+            str(args.patient_markdown_name),
             "--probe-seeds",
             *[str(v) for v in args.probe_seeds],
         ]
@@ -346,15 +360,15 @@ def main() -> None:
             "--output-root",
             str(output_root),
             "--analysis-title",
-            "Global Analysis 5",
+            str(args.analysis_title),
             "--summary-prefix",
-            "summary_global_5",
+            str(args.summary_prefix),
             "--figure-prefix",
-            "fig_global5",
+            str(args.figure_prefix),
             "--markdown-name",
-            "analysis_global_5_cluster_anchoring_attribution.md",
+            str(args.anchoring_markdown_name),
             "--log-prefix",
-            "global_5_cluster_anchoring_attribution",
+            str(args.anchoring_log_prefix),
             "--probe-seeds",
             *[str(v) for v in args.probe_seeds],
             "--knn-k",
@@ -414,8 +428,8 @@ def main() -> None:
             )
 
         run_meta = {
-            "analysis_title": "Global Analysis 5",
-            "analysis_name": "global_5_single_device_patient_retrieval_philips_integris_h_unique_view",
+            "analysis_title": str(args.analysis_title),
+            "analysis_name": str(args.analysis_name),
             "image_root": str(image_root),
             "dcm_root": str(dcm_root),
             "retrieval_root": str(retrieval_root),
@@ -441,12 +455,12 @@ def main() -> None:
             "child_outputs": {
                 "retrieval_root": str(retrieval_root),
                 "final_output_root": str(output_root),
-                "export_markdown": str((output_root / "analysis_global_5_patient_retrieval.md").resolve()),
-                "anchoring_markdown": str((output_root / "analysis_global_5_cluster_anchoring_attribution.md").resolve()),
+                "export_markdown": str((output_root / str(args.patient_markdown_name)).resolve()),
+                "anchoring_markdown": str((output_root / str(args.anchoring_markdown_name)).resolve()),
             },
         }
         (output_root / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
-        log("Global Analysis 5 completed successfully.")
+        log(f"{args.analysis_title} completed successfully.")
     finally:
         restore_console_logging(file_handle, original_stdout, original_stderr)
 
